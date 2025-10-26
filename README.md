@@ -1,10 +1,11 @@
 # Agentic Memory 🧠
+A novel agentic memory system for LLM agents that can dynamically organize memories in an agentic way. 
 
-A novel agentic memory system for LLM agents that can dynamically organize memories in an agentic way.
+This fork extends A-MEM by integrating degree centrality into the hybrid retrieval pipeline. We combine BM25, semantic embeddings, and a normalized centrality factor (β-weighted) to prioritize well-connected memory nodes without expensive graph search.
 
-> **Note:** This repository is specifically designed to reproduce the results presented in our paper. If you want to use the A-MEM system in building your agents, please refer to our official implementation at: [A-mem-sys](https://github.com/WujiangXu/A-mem-sys)
+We evaluate the impact of different β values across the original tasks (MultiHop, Temporal, OpenDomain, SingleHop, Adversarial, Ranking) using F1, BLEU, and Length metrics.
 
-For more details, please refer to our paper: [A-MEM: Agentic Memory for LLM Agents](https://arxiv.org/pdf/2502.12110)
+This repository builds on the original A-MEM system to reproduce and extend the results presented in the paper: [A-MEM: Agentic Memory for LLM Agents](https://arxiv.org/pdf/2502.12110)
 
 ## Introduction 🌟
 
