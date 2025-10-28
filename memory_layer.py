@@ -515,7 +515,7 @@ class AgenticMemorySystem:
                  evo_threshold: int = 100,
                  api_key: Optional[str] = None):
         self.memories = {}  # id -> MemoryNote
-        self.retriever = SimpleEmbeddingRetriever(model_name)
+        self.retriever = HybridRetriever(model_name)
         self.llm_controller = LLMController(llm_backend, llm_model, api_key)
         self.evolution_system_prompt = '''
                                 You are an AI memory evolution agent responsible for managing and evolving a knowledge base.
