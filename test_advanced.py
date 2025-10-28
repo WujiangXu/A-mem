@@ -206,7 +206,7 @@ def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
     
     return logger
 
-def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] = None, ratio: float = 1.0, backend: str = "openai", temperature_c5: float = 0.5, retrieve_k: int = 10):
+def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] = None, ratio: float = 1.0, backend: str = "openai", temperature_c5: float = 0.5, retrieve_k: int = 10, no_qa=False):
     """Evaluate the agent on the LoComo dataset.
     
     Args:
@@ -290,11 +290,14 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
             logger.info(f"No cached memories found for sample {sample_idx}. Creating new memories.")
             cached_memories = None
 
-            for _,turns in sample.conversation.sessions.items():
-                for turn in turns.turns:
+            for idx_2, (_,turns) in enumerate(sample.conversation.sessions.items()):
+                print(f"-----------> new conversation {idx_2+1}/{len(sample.conversation.sessions)}")
+                for idx, turn in enumerate(turns.turns):
                     turn_datatime = turns.date_time
                     conversation_tmp = "Speaker "+ turn.speaker + "says : " + turn.text
+                    print(conversation_tmp)
                     agent.add_memory(conversation_tmp,time=turn_datatime)
+                    print(f"------> {idx+1} / {len(turns.turns)} - conv: {idx_2+1}/{len(sample.conversation.sessions)}")
                     # break
                 #     i +=1
                 #     if i>2:
@@ -308,6 +311,8 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
             
         logger.info(f"\nProcessing sample {sample_idx + 1}/{len(samples)}")
         
+        if no_qa:
+            continue
         for qa in sample.qa:
             if int(qa.category) in allow_categories:
                 total_questions += 1
@@ -408,6 +413,9 @@ def main():
                       help="Temperature for the model")
     parser.add_argument("--retrieve_k", type=int, default=10,
                       help="Retrieve k")
+    parser.add_argument("--skip_qa", action='store_true', default=False,
+                      help="Skip execution of Q/A (just create memories)")
+
     args = parser.parse_args()
     
     if args.ratio <= 0.0 or args.ratio > 1.0:
@@ -419,8 +427,11 @@ def main():
         output_path = os.path.join(os.path.dirname(__file__), args.output)
     else:
         output_path = None
+
+    skip_qa = args.skip_qa
+    print("skip qa", skip_qa)
     
-    evaluate_dataset(dataset_path, args.model, output_path, args.ratio, args.backend, args.temperature_c5, args.retrieve_k)
+    evaluate_dataset(dataset_path, args.model, output_path, args.ratio, args.backend, args.temperature_c5, args.retrieve_k, skip_qa)
 
 if __name__ == "__main__":
     main()
