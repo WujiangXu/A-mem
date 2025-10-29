@@ -36,11 +36,13 @@ except Exception as e:
     sentence_model = None
 
 class advancedMemAgent:
-    def __init__(self, model, backend, retrieve_k, temperature_c5):
+    def __init__(self, model, backend, retrieve_k, temperature_c5, retriever="simple", alpha=0.0):
         self.memory_system = AgenticMemorySystem(
             model_name='all-MiniLM-L6-v2',
             llm_backend=backend,
-            llm_model=model
+            llm_model=model,
+            retriever=retriever,
+            alpha=alpha,
         )
         self.retriever_llm = LLMController(backend=backend, model=model, api_key=None)
         self.retrieve_k = retrieve_k

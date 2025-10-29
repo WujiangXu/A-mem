@@ -394,6 +394,134 @@ class HybridRetriever:
         top_k_indices = np.argsort(hybrid_scores)[-k:][::-1]
         return top_k_indices.tolist()
 
+class CentralityEmbeddingRetriever:
+    """Simple retrieval system using only text embeddings and centrality."""
+    
+    def __init__(self, model_name: str = 'all-MiniLM-L6-v2', alpha=0.25):
+        """Initialize the simple embedding retriever.
+        
+        Args:
+            model_name: Name of the SentenceTransformer model to use
+        """
+        self.model = SentenceTransformer(model_name)
+        self.corpus = []
+        self.embeddings = None
+        self.document_ids = {}  # Map document content to its index
+        self.alpha=alpha
+
+        print("CentralityEmbeddingRetriever with alpha:", self.alpha)
+        
+    def add_documents(self, documents: List[str]):
+        """Add documents to the retriever."""
+        # Reset if no existing documents
+        if not self.corpus:
+            self.corpus = documents
+            # print("documents", documents, len(documents))
+            self.embeddings = self.model.encode(documents)
+            self.document_ids = {doc: idx for idx, doc in enumerate(documents)}
+        else:
+            # Append new documents
+            start_idx = len(self.corpus)
+            self.corpus.extend(documents)
+            new_embeddings = self.model.encode(documents)
+            if self.embeddings is None:
+                self.embeddings = new_embeddings
+            else:
+                self.embeddings = np.vstack([self.embeddings, new_embeddings])
+            for idx, doc in enumerate(documents):
+                self.document_ids[doc] = start_idx + idx
+
+    def search(self, query: str, k: int = 5) -> List[Dict[str, float]]:
+        """Search for similar documents using cosine similarity and graph centrality.
+
+        Args:
+            query: Query text
+            k: Number of results to return
+
+        Returns:
+            List of dicts with document text and score
+        """
+        if not self.corpus:
+            return []
+        # print("corpus", len(self.corpus), self.corpus)
+        # Encode query
+        query_embedding = self.model.encode([query])[0]
+
+        # Calculate cosine similarities
+        similarities = cosine_similarity([query_embedding], self.embeddings)[0]
+
+        # Get centrality scores (links per node) (assumption embedding order matches values)
+        centralities = np.array([len(m.links) for m in self.memories.values()], dtype=float)
+
+        # Normalize centrality scores if they exist
+        max_c = centralities.max() if centralities.size else 0.0
+        if max_c > 0:
+            centralities = centralities / max_c
+
+        # Combine scores
+        combined_scores = self.alpha * centralities + (1 - self.alpha) * similarities
+
+        # Get top k results
+        top_k_indices = np.argsort(combined_scores)[-k:][::-1]
+
+        return top_k_indices.tolist()
+           
+    def save(self, retriever_cache_file: str, retriever_cache_embeddings_file: str):
+        """Save retriever state to disk"""
+        # Save embeddings using numpy
+        if self.embeddings is not None:
+            np.save(retriever_cache_embeddings_file, self.embeddings)
+        
+        # Save other attributes
+        state = {
+            'corpus': self.corpus,
+            'document_ids': self.document_ids
+        }
+        with open(retriever_cache_file, 'wb') as f:
+            pickle.dump(state, f)
+    
+    def load(self, retriever_cache_file: str, retriever_cache_embeddings_file: str):
+        """Load retriever state from disk"""
+        print(f"Loading retriever from {retriever_cache_file} and {retriever_cache_embeddings_file}")
+        
+        # Load embeddings
+        if os.path.exists(retriever_cache_embeddings_file):
+            print(f"Loading embeddings from {retriever_cache_embeddings_file}")
+            self.embeddings = np.load(retriever_cache_embeddings_file)
+            print(f"Embeddings shape: {self.embeddings.shape}")
+        else:
+            print(f"Embeddings file not found: {retriever_cache_embeddings_file}")
+        
+        # Load other attributes
+        if os.path.exists(retriever_cache_file):
+            print(f"Loading corpus from {retriever_cache_file}")
+            with open(retriever_cache_file, 'rb') as f:
+                state = pickle.load(f)
+                self.corpus = state['corpus']
+                self.document_ids = state['document_ids']
+                print(f"Loaded corpus with {len(self.corpus)} documents")
+        else:
+            print(f"Corpus file not found: {retriever_cache_file}")
+            
+        return self
+
+    @classmethod
+    def load_from_local_memory(cls, memories: Dict, model_name: str) -> 'SimpleEmbeddingRetriever':
+        """Load retriever state from memory"""
+        # Create documents combining content and metadata for each memory
+        all_docs = []
+        for m in memories.values():
+            metadata_text = f"{m.context} {' '.join(m.keywords)} {' '.join(m.tags)}"
+            doc = f"{m.content} , {metadata_text}"
+            all_docs.append(doc)
+            
+        # Create and initialize retriever
+        retriever = cls(model_name)
+        retriever.add_documents(all_docs)
+        return retriever
+
+
+
 class SimpleEmbeddingRetriever:
     """Simple retrieval system using only text embeddings."""
     
@@ -513,9 +641,18 @@ class AgenticMemorySystem:
                  llm_backend: str = "openai",
                  llm_model: str = "gpt-4o-mini",
                  evo_threshold: int = 100,
-                 api_key: Optional[str] = None):
+                 api_key: Optional[str] = None,
+                 retriever: str = "simple",
+                 alpha: float = 0.0):
         self.memories = {}  # id -> MemoryNote
-        self.retriever = HybridRetriever(model_name)
+        if retriever == "simple":
+            self.retriever = SimpleEmbeddingRetriever(model_name)
+        elif retriever == "hybrid":
+            self.retriever = HybridRetriever(model_name)
+        elif retriever == "centrality":
+            self.retriever = CentralityEmbeddingRetriever(model_name, alpha)
+        else:
+            raise ValueError(f"Unknown retriever: {retriever}")
         self.llm_controller = LLMController(llm_backend, llm_model, api_key)
         self.evolution_system_prompt = '''
                                 You are an AI memory evolution agent responsible for managing and evolving a knowledge base.
