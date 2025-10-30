@@ -397,7 +397,7 @@ class HybridRetriever:
 class CentralityEmbeddingRetriever:
     """Simple retrieval system using only text embeddings and centrality."""
     
-    def __init__(self, model_name: str = 'all-MiniLM-L6-v2', alpha=0.25):
+    def __init__(self, model_name: str = 'all-MiniLM-L6-v2', alpha:float =0.25, memories: dict = {}):
         """Initialize the simple embedding retriever.
         
         Args:
@@ -408,6 +408,7 @@ class CentralityEmbeddingRetriever:
         self.embeddings = None
         self.document_ids = {}  # Map document content to its index
         self.alpha=alpha
+        self.memories=memories
 
         print("CentralityEmbeddingRetriever with alpha:", self.alpha)
         
@@ -449,6 +450,8 @@ class CentralityEmbeddingRetriever:
 
         # Calculate cosine similarities
         similarities = cosine_similarity([query_embedding], self.embeddings)[0]
+
+        print("MEMORIES: ", len(self.memories))
 
         # Get centrality scores (links per node) (assumption embedding order matches values)
         centralities = np.array([len(m.links) for m in self.memories.values()], dtype=float)
@@ -506,7 +509,7 @@ class CentralityEmbeddingRetriever:
         return self
 
     @classmethod
-    def load_from_local_memory(cls, memories: Dict, model_name: str) -> 'SimpleEmbeddingRetriever':
+    def load_from_local_memory(cls, memories: Dict, model_name: str) -> 'CentralityEmbeddingRetriever':
         """Load retriever state from memory"""
         # Create documents combining content and metadata for each memory
         all_docs = []
@@ -650,7 +653,7 @@ class AgenticMemorySystem:
         elif retriever == "hybrid":
             self.retriever = HybridRetriever(model_name)
         elif retriever == "centrality":
-            self.retriever = CentralityEmbeddingRetriever(model_name, alpha)
+            self.retriever = CentralityEmbeddingRetriever(model_name, alpha, self.memories)
         else:
             raise ValueError(f"Unknown retriever: {retriever}")
         self.llm_controller = LLMController(llm_backend, llm_model, api_key)

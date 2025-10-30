@@ -208,7 +208,7 @@ def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
     
     return logger
 
-def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] = None, ratio: float = 1.0, backend: str = "openai", temperature_c5: float = 0.5, retrieve_k: int = 10, no_qa=False):
+def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] = None, ratio: float = 1.0, backend: str = "openai", temperature_c5: float = 0.5, retrieve_k: int = 10, no_qa=False, retriever: str="simple", alpha: float=0.5):
     """Evaluate the agent on the LoComo dataset.
     
     Args:
@@ -252,7 +252,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     os.makedirs(memories_dir, exist_ok=True)
     allow_categories = [1,2,3,4,5]
     for sample_idx, sample in enumerate(samples):
-        agent = advancedMemAgent(model, backend, retrieve_k, temperature_c5)
+        agent = advancedMemAgent(model, backend, retrieve_k, temperature_c5, retriever=retriever, alpha=alpha)
         # Create memory cache filename based on sample and session indices
         memory_cache_file = os.path.join(
             memories_dir,
@@ -269,7 +269,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
 
         # Check if cached memories exist
         if os.path.exists(memory_cache_file):
-            logger.info(f"Loading cached memories for sample {sample_idx}")
+            logger.info(f"Loading cached memories for sample {sample_idx}: {memory_cache_file}")
             # try:
             with open(memory_cache_file, 'rb') as f:
                 cached_memories = pickle.load(f)
@@ -289,7 +289,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
             #     logger.info(f"Error loading cached memories: {e}. Will recreate memories.")
             #     cached_memories = None
         else:
-            logger.info(f"No cached memories found for sample {sample_idx}. Creating new memories.")
+            logger.info(f"No cached memories found for sample {sample_idx} - {memory_cache_file}. Creating new memories.")
             cached_memories = None
 
             for idx_2, (_,turns) in enumerate(sample.conversation.sessions.items()):
@@ -417,6 +417,9 @@ def main():
                       help="Retrieve k")
     parser.add_argument("--skip_qa", action='store_true', default=False,
                       help="Skip execution of Q/A (just create memories)")
+    parser.add_argument("--retriever", type=str, default="simple",
+                      help="Type of retriever (simple, hybrid, centrality)")
+    parser.add_argument("--alpha", default=0.5, type=float, help="alpha for centrality retriever")
 
     args = parser.parse_args()
     
@@ -431,9 +434,22 @@ def main():
         output_path = None
 
     skip_qa = args.skip_qa
-    print("skip qa", skip_qa)
+    print("skip qa:", skip_qa)
+    print("use retriever:", args.retriever)
+    if args.retriever == "centrality":
+        print("    with alpha: ", args.alpha)
     
-    evaluate_dataset(dataset_path, args.model, output_path, args.ratio, args.backend, args.temperature_c5, args.retrieve_k, skip_qa)
+    evaluate_dataset(
+            dataset_path,
+            args.model,
+            output_path,
+            args.ratio,
+            args.backend,
+            args.temperature_c5,
+            args.retrieve_k,
+            skip_qa,
+            args.retriever,
+            args.alpha)
 
 if __name__ == "__main__":
     main()

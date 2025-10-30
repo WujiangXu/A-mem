@@ -1,5 +1,5 @@
 # Core dependencies
-numpy==1.24.3
+#numpy==1.24.3
 sentence-transformers==3.4.1
 scikit-learn==1.6.1
 torch==2.4.0
