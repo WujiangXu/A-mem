@@ -14,6 +14,8 @@ from nltk.tokenize import word_tokenize
 import pickle
 from pathlib import Path
 from litellm import completion
+import requests
+import json as json_lib
 import time
 
 def simple_tokenize(text):
@@ -98,18 +100,163 @@ class OllamaController(BaseLLMController):
             empty_response = self._generate_empty_response(response_format)
             return json.dumps(empty_response)
 
+class SGLangController(BaseLLMController):
+    def __init__(self, model: str = "llama2", sglang_host: str = "http://localhost", sglang_port: int = 30000):
+        self.model = model
+        self.sglang_host = sglang_host
+        self.sglang_port = sglang_port
+        self.base_url = f"{sglang_host}:{sglang_port}"
+    
+    def _generate_empty_value(self, schema_type: str, schema_items: dict = None) -> Any:
+        if schema_type == "array":
+            return []
+        elif schema_type == "string":
+            return ""
+        elif schema_type == "object":
+            return {}
+        elif schema_type == "number" or schema_type == "integer":
+            return 0
+        elif schema_type == "boolean":
+            return False
+        return None
+
+    def _generate_empty_response(self, response_format: dict) -> dict:
+        if "json_schema" not in response_format:
+            return {}
+            
+        schema = response_format["json_schema"]["schema"]
+        result = {}
+        
+        if "properties" in schema:
+            for prop_name, prop_schema in schema["properties"].items():
+                result[prop_name] = self._generate_empty_value(prop_schema["type"], 
+                                                            prop_schema.get("items"))
+        
+        return result
+
+    def get_completion(self, prompt: str, response_format: dict, temperature: float = 0.7) -> str:
+        try:
+            # Extract JSON schema from response_format and convert to string format
+            json_schema = response_format.get("json_schema", {}).get("schema", {})
+            json_schema_str = json.dumps(json_schema)
+            
+            # Prepare SGLang request with correct format
+            payload = {
+                "text": prompt,
+                "sampling_params": {
+                    "temperature": temperature,
+                    "max_new_tokens": 1000,
+                    "json_schema": json_schema_str  # SGLang expects JSON schema as string
+                }
+            }
+            
+            # Make request to SGLang server
+            response = requests.post(
+                f"{self.base_url}/generate",
+                headers={"Content-Type": "application/json"},
+                json=payload,
+                timeout=60
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                # SGLang returns the generated text in 'text' field
+                generated_text = result.get("text", "")
+                return generated_text
+            else:
+                print(f"SGLang server returned status {response.status_code}: {response.text}")
+                raise Exception(f"SGLang server error: {response.status_code}")
+                
+        except Exception as e:
+            print(f"SGLang completion error: {e}")
+            empty_response = self._generate_empty_response(response_format)
+            return json.dumps(empty_response)
+
+class LiteLLMController(BaseLLMController):
+    """LiteLLM controller for universal LLM access including Ollama and SGLang"""
+    def __init__(self, model: str, api_base: Optional[str] = None, api_key: Optional[str] = None):
+        self.model = model
+        self.api_base = api_base
+        self.api_key = api_key or "EMPTY"
+    
+    def _generate_empty_value(self, schema_type: str, schema_items: dict = None) -> Any:
+        if schema_type == "array":
+            return []
+        elif schema_type == "string":
+            return ""
+        elif schema_type == "object":
+            return {}
+        elif schema_type == "number":
+            return 0
+        elif schema_type == "boolean":
+            return False
+        return None
+
+    def _generate_empty_response(self, response_format: dict) -> dict:
+        if "json_schema" not in response_format:
+            return {}
+            
+        schema = response_format["json_schema"]["schema"]
+        result = {}
+        
+        if "properties" in schema:
+            for prop_name, prop_schema in schema["properties"].items():
+                result[prop_name] = self._generate_empty_value(prop_schema["type"], 
+                                                            prop_schema.get("items"))
+        
+        return result
+
+    def get_completion(self, prompt: str, response_format: dict, temperature: float = 0.7) -> str:
+        try:
+            # Prepare completion arguments
+            completion_args = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": "You must respond with a JSON object."},
+                    {"role": "user", "content": prompt}
+                ],
+                "response_format": response_format,
+                "temperature": temperature
+            }
+            
+            # Add API base and key if provided
+            if self.api_base:
+                completion_args["api_base"] = self.api_base
+            if self.api_key:
+                completion_args["api_key"] = self.api_key
+                
+            response = completion(**completion_args)
+            return response.choices[0].message.content
+            
+        except Exception as e:
+            print(f"LiteLLM completion error: {e}")
+            empty_response = self._generate_empty_response(response_format)
+            return json.dumps(empty_response)
+
 class LLMController:
     """LLM-based controller for memory metadata generation"""
     def __init__(self, 
-                 backend: Literal["openai", "ollama"] = "openai",
+                 backend: Literal["openai", "ollama", "sglang"] = "sglang",
                  model: str = "gpt-4", 
-                 api_key: Optional[str] = None):
+                 api_key: Optional[str] = None,
+                 api_base: Optional[str] = None,
+                 sglang_host: str = "http://localhost",
+                 sglang_port: int = 30000):
         if backend == "openai":
             self.llm = OpenAIController(model, api_key)
         elif backend == "ollama":
-            self.llm = OllamaController(model)
+            # Use LiteLLM to control Ollama with JSON output
+            ollama_model = f"ollama/{model}" if not model.startswith("ollama/") else model
+            self.llm = LiteLLMController(
+                model=ollama_model, 
+                api_base="http://localhost:11434", 
+                api_key="EMPTY"
+            )
+        elif backend == "sglang":
+            # Direct SGLang API calls (better performance, no proxy)
+            self.llm = SGLangController(model, sglang_host, sglang_port)
         else:
-            raise ValueError("Backend must be either 'openai' or 'ollama'")
+            raise ValueError("Backend must be 'openai', 'ollama', or 'sglang'")
 
 class MemoryNote:
     """Basic memory unit with metadata"""
@@ -218,9 +365,27 @@ class MemoryNote:
             })
             
             try:
-                analysis = json.loads(response)
-            except:
-                analysis = response
+                # Clean the response in case there's extra text
+                response_cleaned = response.strip()
+                # Try to find JSON content if wrapped in other text
+                if not response_cleaned.startswith('{'):
+                    start_idx = response_cleaned.find('{')
+                    if start_idx != -1:
+                        response_cleaned = response_cleaned[start_idx:]
+                if not response_cleaned.endswith('}'):
+                    end_idx = response_cleaned.rfind('}')
+                    if end_idx != -1:
+                        response_cleaned = response_cleaned[:end_idx+1]
+                
+                analysis = json.loads(response_cleaned)
+            except json.JSONDecodeError as e:
+                print(f"JSON parsing error in analyze_content: {e}")
+                print(f"Raw response: {response}")
+                analysis = {
+                    "keywords": [],
+                    "context": "General",
+                    "tags": []
+                }
             
             return analysis
             
@@ -501,13 +666,16 @@ class AgenticMemorySystem:
     """Memory management system with embedding-based retrieval"""
     def __init__(self, 
                  model_name: str = 'all-MiniLM-L6-v2',
-                 llm_backend: str = "openai",
+                 llm_backend: str = "sglang",
                  llm_model: str = "gpt-4o-mini",
                  evo_threshold: int = 100,
-                 api_key: Optional[str] = None):
+                 api_key: Optional[str] = None,
+                 api_base: Optional[str] = None,
+                 sglang_host: str = "http://localhost",
+                 sglang_port: int = 30000):
         self.memories = {}  # id -> MemoryNote
         self.retriever = SimpleEmbeddingRetriever(model_name)
-        self.llm_controller = LLMController(llm_backend, llm_model, api_key)
+        self.llm_controller = LLMController(llm_backend, llm_model, api_key, api_base, sglang_host, sglang_port)
         self.evolution_system_prompt = '''
                                 You are an AI memory evolution agent responsible for managing and evolving a knowledge base.
                                 Analyze the the new memory note according to keywords and context, also with their several nearest neighbors memory.
@@ -635,12 +803,27 @@ class AgenticMemorySystem:
                         "strict": True
                     }}
         )
-        # try:
-        # print("response", response, type(response))
-        response_json = json.loads(response)
-        print("response_json", response_json, type(response_json))
-        # except:
-        #     response_json = response
+        try:
+            print("response", response, type(response))
+            # Clean the response in case there's extra text
+            response_cleaned = response.strip()
+            # Try to find JSON content if wrapped in other text
+            if not response_cleaned.startswith('{'):
+                start_idx = response_cleaned.find('{')
+                if start_idx != -1:
+                    response_cleaned = response_cleaned[start_idx:]
+            if not response_cleaned.endswith('}'):
+                end_idx = response_cleaned.rfind('}')
+                if end_idx != -1:
+                    response_cleaned = response_cleaned[:end_idx+1]
+            
+            response_json = json.loads(response_cleaned)
+            print("response_json", response_json, type(response_json))
+        except json.JSONDecodeError as e:
+            print(f"JSON parsing error: {e}")
+            print(f"Raw response: {response}")
+            # Return default values for failed parsing
+            return False, note
         should_evolve = response_json["should_evolve"]
         if should_evolve:
             actions = response_json["actions"]

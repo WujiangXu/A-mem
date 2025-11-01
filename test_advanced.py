@@ -36,13 +36,21 @@ except Exception as e:
     sentence_model = None
 
 class advancedMemAgent:
-    def __init__(self, model, backend, retrieve_k, temperature_c5):
+    def __init__(self, model, backend, retrieve_k, temperature_c5, sglang_host="http://localhost", sglang_port=30000):
         self.memory_system = AgenticMemorySystem(
             model_name='all-MiniLM-L6-v2',
             llm_backend=backend,
-            llm_model=model
+            llm_model=model,
+            sglang_host=sglang_host,
+            sglang_port=sglang_port
         )
-        self.retriever_llm = LLMController(backend=backend, model=model, api_key=None)
+        self.retriever_llm = LLMController(
+            backend=backend, 
+            model=model, 
+            api_key=None, 
+            sglang_host=sglang_host, 
+            sglang_port=sglang_port
+        )
         self.retrieve_k = retrieve_k
         self.temperature_c5 = temperature_c5
 
@@ -206,7 +214,7 @@ def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
     
     return logger
 
-def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] = None, ratio: float = 1.0, backend: str = "openai", temperature_c5: float = 0.5, retrieve_k: int = 10):
+def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] = None, ratio: float = 1.0, backend: str = "sglang", temperature_c5: float = 0.5, retrieve_k: int = 10, sglang_host: str = "http://localhost", sglang_port: int = 30000):
     """Evaluate the agent on the LoComo dataset.
     
     Args:
@@ -250,7 +258,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     os.makedirs(memories_dir, exist_ok=True)
     allow_categories = [1,2,3,4,5]
     for sample_idx, sample in enumerate(samples):
-        agent = advancedMemAgent(model, backend, retrieve_k, temperature_c5)
+        agent = advancedMemAgent(model, backend, retrieve_k, temperature_c5, sglang_host, sglang_port)
         # Create memory cache filename based on sample and session indices
         memory_cache_file = os.path.join(
             memories_dir,
@@ -402,12 +410,16 @@ def main():
                       help="Path to save evaluation results")
     parser.add_argument("--ratio", type=float, default=1.0,
                       help="Ratio of dataset to evaluate (0.0 to 1.0)")
-    parser.add_argument("--backend", type=str, default="openai",
-                      help="Backend to use (openai or ollama)")
+    parser.add_argument("--backend", type=str, default="sglang",
+                      help="Backend to use (openai, ollama, or sglang)")
     parser.add_argument("--temperature_c5", type=float, default=0.5,
                       help="Temperature for the model")
     parser.add_argument("--retrieve_k", type=int, default=10,
                       help="Retrieve k")
+    parser.add_argument("--sglang_host", type=str, default="http://localhost",
+                      help="SGLang server host (for sglang backend)")
+    parser.add_argument("--sglang_port", type=int, default=30000,
+                      help="SGLang server port (for sglang backend)")
     args = parser.parse_args()
     
     if args.ratio <= 0.0 or args.ratio > 1.0:
@@ -420,7 +432,7 @@ def main():
     else:
         output_path = None
     
-    evaluate_dataset(dataset_path, args.model, output_path, args.ratio, args.backend, args.temperature_c5, args.retrieve_k)
+    evaluate_dataset(dataset_path, args.model, output_path, args.ratio, args.backend, args.temperature_c5, args.retrieve_k, args.sglang_host, args.sglang_port)
 
 if __name__ == "__main__":
     main()
