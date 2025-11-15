@@ -397,7 +397,7 @@ class HybridRetriever:
 class CentralityEmbeddingRetriever:
     """Simple retrieval system using only text embeddings and centrality."""
     
-    def __init__(self, model_name: str = 'all-MiniLM-L6-v2', alpha:float =0.25, memories: dict = {}):
+    def __init__(self, model_name: str = 'all-MiniLM-L6-v2', alpha:float =0.25):
         """Initialize the simple embedding retriever.
         
         Args:
@@ -408,7 +408,6 @@ class CentralityEmbeddingRetriever:
         self.embeddings = None
         self.document_ids = {}  # Map document content to its index
         self.alpha=alpha
-        self.memories=memories
 
         print("CentralityEmbeddingRetriever with alpha:", self.alpha)
         
@@ -432,7 +431,7 @@ class CentralityEmbeddingRetriever:
             for idx, doc in enumerate(documents):
                 self.document_ids[doc] = start_idx + idx
 
-    def search(self, query: str, k: int = 5) -> List[Dict[str, float]]:
+    def search(self, query: str, k: int = 5, memories: dict = {}) -> List[Dict[str, float]]:
         """Search for similar documents using cosine similarity and graph centrality.
 
         Args:
@@ -451,10 +450,10 @@ class CentralityEmbeddingRetriever:
         # Calculate cosine similarities
         similarities = cosine_similarity([query_embedding], self.embeddings)[0]
 
-        print("MEMORIES: ", len(self.memories))
+        print("MEMORIES: ", len(memories))
 
         # Get centrality scores (links per node) (assumption embedding order matches values)
-        centralities = np.array([len(m.links) for m in self.memories.values()], dtype=float)
+        centralities = np.array([len(m.links) for m in memories.values()], dtype=float)
 
         # Normalize centrality scores if they exist
         max_c = centralities.max() if centralities.size else 0.0
@@ -559,7 +558,7 @@ class SimpleEmbeddingRetriever:
             for idx, doc in enumerate(documents):
                 self.document_ids[doc] = start_idx + idx
     
-    def search(self, query: str, k: int = 5) -> List[Dict[str, float]]:
+    def search(self, query: str, k: int = 5, all_memories: dict = {}) -> List[Dict[str, float]]:
         """Search for similar documents using cosine similarity.
         
         Args:
@@ -653,7 +652,7 @@ class AgenticMemorySystem:
         elif retriever == "hybrid":
             self.retriever = HybridRetriever(model_name)
         elif retriever == "centrality":
-            self.retriever = CentralityEmbeddingRetriever(model_name, alpha, self.memories)
+            self.retriever = CentralityEmbeddingRetriever(model_name, alpha)
         else:
             raise ValueError(f"Unknown retriever: {retriever}")
         self.llm_controller = LLMController(llm_backend, llm_model, api_key)
@@ -828,7 +827,7 @@ class AgenticMemorySystem:
             
         # Get indices of related memories
         # indices = self.retriever.retrieve(query_note.content, k)
-        indices = self.retriever.search(query, k)
+        indices = self.retriever.search(query, k, self.memories)
         
         # Convert to list of memories
         all_memories = list(self.memories.values())
@@ -846,7 +845,8 @@ class AgenticMemorySystem:
             
         # Get indices of related memories
         # indices = self.retriever.retrieve(query_note.content, k)
-        indices = self.retriever.search(query, k)
+
+        indices = self.retriever.search(query, k, self.memories)
         
         # Convert to list of memories
         all_memories = list(self.memories.values())
