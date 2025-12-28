@@ -886,8 +886,8 @@ class AgenticMemorySystem:
         # Convert to list of memories
         all_memories = list(self.memories.values())
         memory_str = ""
-        j = 0
         for i in indices:
+            j = 0
             memory_str +=  "talk start time:" + all_memories[i].timestamp + "memory content: " + all_memories[i].content + "memory context: " + all_memories[i].context + "memory keywords: " + str(all_memories[i].keywords) + "memory tags: " + str(all_memories[i].tags) + "\n"
             neighborhood = all_memories[i].links
             for neighbor in neighborhood:
