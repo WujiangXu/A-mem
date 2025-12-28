@@ -364,21 +364,22 @@ class MemoryNote:
                 }
             })
             
-            try:
-                # Clean the response in case there's extra text
-                response_cleaned = response.strip()
-                # Try to find JSON content if wrapped in other text
-                if not response_cleaned.startswith('{'):
-                    start_idx = response_cleaned.find('{')
-                    if start_idx != -1:
-                        response_cleaned = response_cleaned[start_idx:]
-                if not response_cleaned.endswith('}'):
-                    end_idx = response_cleaned.rfind('}')
-                    if end_idx != -1:
-                        response_cleaned = response_cleaned[:end_idx+1]
-                
-                analysis = json.loads(response_cleaned)
-            except json.JSONDecodeError as e:
+            # try:
+            #     # Clean the response in case there's extra text
+            #     response_cleaned = response.strip()
+            #     # Try to find JSON content if wrapped in other text
+            #     if not response_cleaned.startswith('{'):
+            #         start_idx = response_cleaned.find('{')
+            #         if start_idx != -1:
+            #             response_cleaned = response_cleaned[start_idx:]
+            #     if not response_cleaned.endswith('}'):
+            #         end_idx = response_cleaned.rfind('}')
+            #         if end_idx != -1:
+            #             response_cleaned = response_cleaned[:end_idx+1]
+            try:        
+                response = re.sub(r'^```json\s*|\s*```$', '', response, flags=re.MULTILINE).strip()
+                analysis = json.loads(response)
+            except:
                 print(f"JSON parsing error in analyze_content: {e}")
                 print(f"Raw response: {response}")
                 analysis = {
