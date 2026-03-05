@@ -410,7 +410,7 @@ def main():
                       help="Path to save evaluation results")
     parser.add_argument("--ratio", type=float, default=1.0,
                       help="Ratio of dataset to evaluate (0.0 to 1.0)")
-    parser.add_argument("--backend", type=str, default="sglang",
+    parser.add_argument("--backend", type=str, default="openai",
                       help="Backend to use (openai, ollama, or sglang)")
     parser.add_argument("--temperature_c5", type=float, default=0.5,
                       help="Temperature for the model")

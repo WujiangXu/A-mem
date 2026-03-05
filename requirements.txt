@@ -1,26 +1,26 @@
 # Core dependencies
-numpy==1.24.3
-sentence-transformers==3.4.1
-scikit-learn==1.6.1
-torch==2.4.0
-transformers==4.46.3
-nltk==3.9.1
-rank-bm25==0.2.2
+numpy
+sentence-transformers
+scikit-learn
+torch
+transformers
+nltk
+rank-bm25
 
 # LLM API clients
-openai==1.61.1
-litellm==1.59.1
-ollama==0.3.3
+openai
+litellm
+ollama
 
 # Evaluation metrics
-rouge-score==0.1.2
-bert-score==0.3.13
+rouge-score
+bert-score
 
 # Utilities
-tqdm==4.66.1
-pandas==2.2.3
-pathlib==1.0.1
-python-dotenv==1.0.1
+tqdm
+pandas
+pathlib
+python-dotenv
 
-# Optional dependencies
-pytorch-cuda==2.4.0  # Only if using CUDA
+# Testing
+pytest

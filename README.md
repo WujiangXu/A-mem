@@ -2,9 +2,9 @@
 
 A novel agentic memory system for LLM agents that can dynamically organize memories in an agentic way.
 
-> **Note:** This repository is specifically designed to reproduce the results presented in our paper. If you want to use the A-MEM system in building your agents, please refer to our official implementation at: [A-mem-sys](https://github.com/WujiangXu/A-mem-sys)
+> **Note:** This repository is specifically designed to reproduce the results presented in our paper. If you want to use the A-Mem system in building your agents, please refer to our official implementation at: [A-mem-sys](https://github.com/WujiangXu/A-mem-sys)
 
-For more details, please refer to our paper: [A-MEM: Agentic Memory for LLM Agents](https://arxiv.org/pdf/2502.12110)
+For more details, please refer to our paper: [A-Mem: Agentic Memory for LLM Agents](https://arxiv.org/pdf/2502.12110)
 
 ## Introduction 🌟
 
@@ -80,11 +80,46 @@ pip install -r requirements.txt
 ```
 
 3. Run the experiments in LoCoMo dataset:
-```python
-python test_advanced.py 
+
+**Option A — Original evaluation (requires OpenAI JSON schema support):**
+```bash
+python test_advanced.py
 ```
 
-**Note:** To achieve the optimal performance reported in our paper, please adjust the hyperparameter k value accordingly.
+**Option B — Robust evaluation (recommended, works with any LLM backend):**
+
+The robust evaluation (`test_advanced_robust.py`) removes the JSON schema dependency and supports OpenAI API, vLLM, and Ollama backends.
+
+```bash
+# OpenAI models
+python test_advanced_robust.py --backend openai --model gpt-4o-mini \
+    --dataset data/locomo10.json --output results_robust_gpt-4o-mini.json
+
+# vLLM-served open-source models (start vLLM server first)
+python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen2.5-3B-Instruct --port 30000 \
+    --dtype float16 --enforce-eager --max-model-len 8192
+python test_advanced_robust.py --backend vllm --model Qwen/Qwen2.5-3B-Instruct \
+    --dataset data/locomo10.json --output results_robust_qwen3b.json \
+    --sglang_port 30000
+
+# Ollama models
+python test_advanced_robust.py --backend ollama --model qwen2.5:3b \
+    --dataset data/locomo10.json --output results_robust_ollama_qwen3b.json
+```
+
+Key arguments:
+- `--retrieve_k`: Number of memories to retrieve per query (default: 10). Tune this per model for best results.
+- `--ratio`: Fraction of dataset to evaluate (e.g., `--ratio 0.1` for 10% quick test).
+- `--backend`: One of `openai`, `vllm`, `ollama`.
+- `--sglang_port`: Port for vLLM/SGLang server (default: 30000).
+
+4. Run the full k-sweep to find optimal retrieval k per model:
+```bash
+bash run_k_sweep.sh
+```
+
+**Note:** To achieve the optimal performance reported in our paper, please adjust the hyperparameter `k` value accordingly. Memories are cached after the first run, so subsequent k-sweep evaluations only re-run the QA answering step.
 
 **Categories Information:** The LoCoMo dataset contains the following categories:
 * Category 1: Multi-hop
@@ -101,7 +136,7 @@ If you use this code in your research, please cite our work:
 
 ```bibtex
 @inproceedings{xu2025amem,
-  title={A-mem: Agentic memory for llm agents},
+  title={A-Mem: Agentic memory for llm agents},
   author={Xu, Wujiang and Liang, Zujie and Mei, Kai and Gao, Hang and Tan, Juntao and Zhang, Yongfeng},
   booktitle={Advances in Neural Information Processing Systems},
   year={2025}
