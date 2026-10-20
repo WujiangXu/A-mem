@@ -21,7 +21,7 @@ import functools
 from datetime import datetime
 from abc import ABC, abstractmethod
 
-from memory_layer import SimpleEmbeddingRetriever, simple_tokenize
+from memory_layer import SimpleEmbeddingRetriever, simple_tokenize, FAILURES, valid_link
 from llm_text_parsers import (
     ANALYZE_CONTENT_PROMPT,
     EVOLUTION_DECISION_PROMPT,
@@ -336,6 +336,7 @@ class RobustMemoryNote:
 
         except Exception as e:
             logger.error("Error analyzing content: %s", e)
+            FAILURES["analyze"] += 1
             # Graceful degradation: heuristic keywords/context
             from llm_text_parsers import _heuristic_keywords, _heuristic_context
             return {
@@ -446,6 +447,8 @@ class RobustAgenticMemorySystem:
             )
             neighborhood = all_memories[i].links
             for neighbor in neighborhood:
+                if not valid_link(neighbor, len(all_memories)):  # e.g. memories cached before link validation
+                    continue
                 memory_str += (
                     "talk start time:" + all_memories[neighbor].timestamp +
                     "memory content: " + all_memories[neighbor].content +
@@ -502,7 +505,9 @@ class RobustAgenticMemorySystem:
                 strengthen = parse_strengthen_details(strengthen_response)
                 logger.debug("Strengthen details: %s", strengthen)
 
-                note.links.extend(strengthen["connections"])
+                # keep only indices of existing memories: an out-of-range id breaks retrieval
+                # and a negative one silently points at the wrong memory
+                note.links.extend(c for c in strengthen["connections"] if valid_link(c, len(self.memories)))
                 if strengthen["tags"]:
                     note.tags = strengthen["tags"]
 
@@ -537,4 +542,5 @@ class RobustAgenticMemorySystem:
 
         except Exception as e:
             logger.error("Evolution failed for note %s: %s — storing without evolution", note.id, e)
+            FAILURES["evolve"] += 1
             return False, note

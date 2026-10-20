@@ -17,6 +17,15 @@ from litellm import completion
 import requests
 import json as json_lib
 import time
+from collections import Counter
+
+# LLM failures that were absorbed (the call fell back to an empty or default result) instead of
+# raised, by kind. The evaluation scripts report them, so silent failures show up in the results.
+FAILURES = Counter()
+
+def valid_link(i, n: int) -> bool:
+    """True if i can index a memory list of length n (bool and negative indices are rejected)."""
+    return isinstance(i, (int, np.integer)) and not isinstance(i, bool) and 0 <= i < n
 
 def simple_tokenize(text):
     return word_tokenize(text)
@@ -97,6 +106,8 @@ class OllamaController(BaseLLMController):
             )
             return response.choices[0].message.content
         except Exception as e:
+            print(f"Ollama completion error: {e}")
+            FAILURES["llm_call"] += 1
             empty_response = self._generate_empty_response(response_format)
             return json.dumps(empty_response)
 
@@ -169,6 +180,7 @@ class SGLangController(BaseLLMController):
                 
         except Exception as e:
             print(f"SGLang completion error: {e}")
+            FAILURES["llm_call"] += 1
             empty_response = self._generate_empty_response(response_format)
             return json.dumps(empty_response)
 
@@ -230,6 +242,7 @@ class LiteLLMController(BaseLLMController):
             
         except Exception as e:
             print(f"LiteLLM completion error: {e}")
+            FAILURES["llm_call"] += 1
             empty_response = self._generate_empty_response(response_format)
             return json.dumps(empty_response)
 
@@ -379,8 +392,9 @@ class MemoryNote:
             try:        
                 response = re.sub(r'^```json\s*|\s*```$', '', response, flags=re.MULTILINE).strip()
                 analysis = json.loads(response)
-            except:
+            except Exception as e:
                 print(f"JSON parsing error in analyze_content: {e}")
+                FAILURES["analyze"] += 1
                 print(f"Raw response: {response}")
                 analysis = {
                     "keywords": [],
@@ -392,6 +406,7 @@ class MemoryNote:
             
         except Exception as e:
             print(f"Error analyzing content: {str(e)}")
+            FAILURES["analyze"] += 1
             print(f"Raw response: {response}")
             return {
                 "keywords": [],
@@ -518,11 +533,11 @@ class HybridRetriever:
             self.bm25.add_document(tokenized_doc)
         
         # Update embeddings
-        doc_embedding = self.model.encode([document], convert_to_tensor=True)
+        doc_embedding = self.model.encode([document])
         if self.embeddings is None:
             self.embeddings = doc_embedding
         else:
-            self.embeddings = torch.cat([self.embeddings, doc_embedding])
+            self.embeddings = np.vstack([self.embeddings, doc_embedding])
             
         return True
         
@@ -823,6 +838,7 @@ class AgenticMemorySystem:
         except json.JSONDecodeError as e:
             print(f"JSON parsing error: {e}")
             print(f"Raw response: {response}")
+            FAILURES["evolve"] += 1
             # Return default values for failed parsing
             return False, note
         should_evolve = response_json["should_evolve"]
@@ -830,10 +846,15 @@ class AgenticMemorySystem:
             actions = response_json["actions"]
             for action in actions:
                 if action == "strengthen":
-                    suggest_connections = response_json["suggested_connections"]
+                    # keep only indices of existing memories: an out-of-range id breaks retrieval
+                    # and a negative one silently points at the wrong memory
+                    n_memories = len(self.memories)
+                    suggest_connections = [int(c) for c in response_json["suggested_connections"]
+                                           if valid_link(c, n_memories)]
                     new_tags = response_json["tags_to_update"]
                     note.links.extend(suggest_connections)
-                    note.tags = new_tags
+                    if new_tags:  # an empty list must not wipe the note's tags
+                        note.tags = new_tags
                 elif action == "update_neighbor":
                     new_context_neighborhood = response_json["new_context_neighborhood"]
                     new_tags_neighborhood = response_json["new_tags_neighborhood"]
@@ -850,9 +871,11 @@ class AgenticMemorySystem:
                             context = noteslist[indices[i]].context
                         memorytmp_idx = indices[i]
                         notetmp = noteslist[memorytmp_idx]
-                        # add tag to memory
-                        notetmp.tags = tag
-                        notetmp.context = context
+                        # add tag to memory; empty values keep the existing ones
+                        if tag:
+                            notetmp.tags = tag
+                        if context:
+                            notetmp.context = context
                         self.memories[notes_id[memorytmp_idx]] = notetmp
         return should_evolve,note
 
@@ -891,6 +914,8 @@ class AgenticMemorySystem:
             memory_str +=  "talk start time:" + all_memories[i].timestamp + "memory content: " + all_memories[i].content + "memory context: " + all_memories[i].context + "memory keywords: " + str(all_memories[i].keywords) + "memory tags: " + str(all_memories[i].tags) + "\n"
             neighborhood = all_memories[i].links
             for neighbor in neighborhood:
+                if not valid_link(neighbor, len(all_memories)):  # e.g. memories cached before link validation
+                    continue
                 memory_str += "talk start time:" + all_memories[neighbor].timestamp + "memory content: " + all_memories[neighbor].content + "memory context: " + all_memories[neighbor].context + "memory keywords: " + str(all_memories[neighbor].keywords) + "memory tags: " + str(all_memories[neighbor].tags) + "\n"
                 if j >=k:
                     break
