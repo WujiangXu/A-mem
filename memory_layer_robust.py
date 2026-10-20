@@ -21,7 +21,7 @@ import functools
 from datetime import datetime
 from abc import ABC, abstractmethod
 
-from memory_layer import SimpleEmbeddingRetriever, simple_tokenize, FAILURES, valid_link, note_document
+from memory_layer import SimpleEmbeddingRetriever, simple_tokenize, FAILURES, valid_link, note_document, as_index
 from llm_text_parsers import (
     ANALYZE_CONTENT_PROMPT,
     EVOLUTION_DECISION_PROMPT,
@@ -507,9 +507,14 @@ class RobustAgenticMemorySystem:
                 strengthen = parse_strengthen_details(strengthen_response)
                 logger.debug("Strengthen details: %s", strengthen)
 
-                # keep only indices of existing memories: an out-of-range id breaks retrieval
-                # and a negative one silently points at the wrong memory
-                note.links.extend(c for c in strengthen["connections"] if valid_link(c, len(self.memories)))
+                # keep only the shown neighbours' "memory index" values: an out-of-range id breaks
+                # retrieval, and any other id points at a memory the LLM never saw
+                shown = {int(i) for i in indices}
+                for c in map(as_index, strengthen["connections"]):
+                    if c in shown:
+                        note.links.append(c)
+                    else:
+                        FAILURES["invalid_link"] += 1
                 if strengthen["tags"]:
                     note.tags = strengthen["tags"]
 
