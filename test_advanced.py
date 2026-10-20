@@ -36,13 +36,15 @@ except Exception as e:
     sentence_model = None
 
 class advancedMemAgent:
-    def __init__(self, model, backend, retrieve_k, temperature_c5, sglang_host="http://localhost", sglang_port=30000):
+    def __init__(self, model, backend, retrieve_k, temperature_c5, sglang_host="http://localhost", sglang_port=30000,
+                 refresh_index=False):
         self.memory_system = AgenticMemorySystem(
             model_name='all-MiniLM-L6-v2',
             llm_backend=backend,
             llm_model=model,
             sglang_host=sglang_host,
-            sglang_port=sglang_port
+            sglang_port=sglang_port,
+            refresh_index=refresh_index
         )
         self.retriever_llm = LLMController(
             backend=backend, 
@@ -214,7 +216,7 @@ def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
     
     return logger
 
-def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] = None, ratio: float = 1.0, backend: str = "sglang", temperature_c5: float = 0.5, retrieve_k: int = 10, sglang_host: str = "http://localhost", sglang_port: int = 30000, legacy_c5_reference: bool = False, seed: int = 42):
+def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] = None, ratio: float = 1.0, backend: str = "sglang", temperature_c5: float = 0.5, retrieve_k: int = 10, sglang_host: str = "http://localhost", sglang_port: int = 30000, legacy_c5_reference: bool = False, seed: int = 42, refresh_index: bool = False):
     """Evaluate the agent on the LoComo dataset.
     
     Args:
@@ -255,11 +257,12 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     # Evaluate each sample
     i = 0
     error_num = 0
-    memories_dir = os.path.join(os.path.dirname(__file__), "cached_memories_advanced_{}_{}".format(backend, model))
+    memories_dir = os.path.join(os.path.dirname(__file__), "cached_memories_advanced_{}_{}{}".format(
+        backend, model, "_refresh" if refresh_index else ""))
     os.makedirs(memories_dir, exist_ok=True)
     allow_categories = [1,2,3,4,5]
     for sample_idx, sample in enumerate(samples):
-        agent = advancedMemAgent(model, backend, retrieve_k, temperature_c5, sglang_host, sglang_port)
+        agent = advancedMemAgent(model, backend, retrieve_k, temperature_c5, sglang_host, sglang_port, refresh_index)
         # Create memory cache filename based on sample and session indices
         memory_cache_file = os.path.join(
             memories_dir,
@@ -372,6 +375,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         "aggregate_metrics": aggregate_results,
         "seed": seed,
         "legacy_c5_reference": legacy_c5_reference,
+        "refresh_index": refresh_index,
         # failures absorbed in this run (memories loaded from the cache were built earlier)
         "llm_failures": dict(FAILURES),
         "answer_parse_errors": error_num,
@@ -427,6 +431,10 @@ def main():
                            "(default: against 'Not mentioned in the conversation', the correct response)")
     parser.add_argument("--seed", type=int, default=42,
                       help="Random seed for the order of the two category-5 answer options")
+    parser.add_argument("--refresh_index", action="store_true",
+                      help="Re-embed neighbour memories as soon as evolution updates them (default: their "
+                           "embeddings refresh only every evo_threshold evolutions, as in the paper). Builds "
+                           "its own memory cache")
     args = parser.parse_args()
     
     if args.ratio <= 0.0 or args.ratio > 1.0:
@@ -439,7 +447,7 @@ def main():
     else:
         output_path = None
     
-    evaluate_dataset(dataset_path, args.model, output_path, args.ratio, args.backend, args.temperature_c5, args.retrieve_k, args.sglang_host, args.sglang_port, args.legacy_c5_reference, args.seed)
+    evaluate_dataset(dataset_path, args.model, output_path, args.ratio, args.backend, args.temperature_c5, args.retrieve_k, args.sglang_host, args.sglang_port, args.legacy_c5_reference, args.seed, args.refresh_index)
 
 if __name__ == "__main__":
     main()

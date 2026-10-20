@@ -55,13 +55,14 @@ class RobustAdvancedMemAgent:
     """Agent using the robust memory system with plain-text LLM calls."""
 
     def __init__(self, model, backend, retrieve_k, temperature_c5,
-                 sglang_host="http://localhost", sglang_port=30000):
+                 sglang_host="http://localhost", sglang_port=30000, refresh_index=False):
         self.memory_system = RobustAgenticMemorySystem(
             model_name='all-MiniLM-L6-v2',
             llm_backend=backend,
             llm_model=model,
             sglang_host=sglang_host,
             sglang_port=sglang_port,
+            refresh_index=refresh_index,
         )
         self.retriever_llm = RobustLLMController(
             backend=backend,
@@ -177,7 +178,8 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                      ratio: float = 1.0, backend: str = "sglang",
                      temperature_c5: float = 0.5, retrieve_k: int = 10,
                      sglang_host: str = "http://localhost", sglang_port: int = 30000,
-                     legacy_c5_reference: bool = False, seed: int = 42):
+                     legacy_c5_reference: bool = False, seed: int = 42,
+                     refresh_index: bool = False):
     """Evaluate the robust agent on the LoComo dataset."""
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
     log_filename = f"eval_robust_{model}_{backend}_ratio{ratio}_{timestamp}.log"
@@ -207,14 +209,14 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     error_num = 0
     memories_dir = os.path.join(
         os.path.dirname(__file__),
-        "cached_memories_robust_{}_{}".format(backend, model),
+        "cached_memories_robust_{}_{}{}".format(backend, model, "_refresh" if refresh_index else ""),
     )
     os.makedirs(memories_dir, exist_ok=True)
     allow_categories = [1, 2, 3, 4, 5]
 
     for sample_idx, sample in enumerate(samples):
         agent = RobustAdvancedMemAgent(model, backend, retrieve_k, temperature_c5,
-                                       sglang_host, sglang_port)
+                                       sglang_host, sglang_port, refresh_index)
 
         memory_cache_file = os.path.join(memories_dir, f"memory_cache_sample_{sample_idx}.pkl")
         retriever_cache_file = os.path.join(memories_dir, f"retriever_cache_sample_{sample_idx}.pkl")
@@ -306,6 +308,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         "aggregate_metrics": aggregate_results,
         "seed": seed,
         "legacy_c5_reference": legacy_c5_reference,
+        "refresh_index": refresh_index,
         # failures absorbed in this run (memories loaded from the cache were built earlier);
         # "answer" counts questions scored as empty predictions because the call failed
         "llm_failures": dict(FAILURES),
@@ -363,6 +366,10 @@ def main():
                              "(default: against 'Not mentioned in the conversation', the correct response)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for the order of the two category-5 answer options")
+    parser.add_argument("--refresh_index", action="store_true",
+                        help="Re-embed neighbour memories as soon as evolution updates them (default: their "
+                             "embeddings refresh only every evo_threshold evolutions, as in the paper). Builds "
+                             "its own memory cache")
     args = parser.parse_args()
 
     if args.ratio <= 0.0 or args.ratio > 1.0:
@@ -375,6 +382,7 @@ def main():
         dataset_path, args.model, output_path, args.ratio,
         args.backend, args.temperature_c5, args.retrieve_k,
         args.sglang_host, args.sglang_port, args.legacy_c5_reference, args.seed,
+        args.refresh_index,
     )
 
 

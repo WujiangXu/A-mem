@@ -21,7 +21,7 @@ import functools
 from datetime import datetime
 from abc import ABC, abstractmethod
 
-from memory_layer import SimpleEmbeddingRetriever, simple_tokenize, FAILURES, valid_link
+from memory_layer import SimpleEmbeddingRetriever, simple_tokenize, FAILURES, valid_link, note_document
 from llm_text_parsers import (
     ANALYZE_CONTENT_PROMPT,
     EVOLUTION_DECISION_PROMPT,
@@ -362,9 +362,13 @@ class RobustAgenticMemorySystem:
                  api_base: Optional[str] = None,
                  sglang_host: str = "http://localhost",
                  sglang_port: int = 30000,
-                 check_connection: bool = False):
+                 check_connection: bool = False,
+                 refresh_index: bool = False):
 
         self.memories: Dict[str, RobustMemoryNote] = {}
+        # re-embed neighbours as soon as evolution updates them; otherwise their embeddings stay
+        # stale until consolidate_memories runs every evo_threshold evolutions (paper behaviour)
+        self.refresh_index = refresh_index
         self.retriever = SimpleEmbeddingRetriever(model_name)
         self.llm_controller = RobustLLMController(
             llm_backend, llm_model, api_key, api_base,
@@ -385,12 +389,7 @@ class RobustAgenticMemorySystem:
         )
         evo_label, note = self.process_memory(note)
         self.memories[note.id] = note
-        self.retriever.add_documents([
-            "content:" + note.content +
-            " context:" + note.context +
-            " keywords: " + ", ".join(note.keywords) +
-            " tags: " + ", ".join(note.tags)
-        ])
+        self.retriever.add_documents([note_document(note)])
         if evo_label:
             self.evo_cnt += 1
             if self.evo_cnt % self.evo_threshold == 0:
@@ -406,6 +405,9 @@ class RobustAgenticMemorySystem:
 
         self.retriever = SimpleEmbeddingRetriever(model_name)
         for memory in self.memories.values():
+            if self.refresh_index:  # the same document format as add_note
+                self.retriever.add_documents([note_document(memory)])
+                continue
             metadata_text = f"{memory.context} {' '.join(memory.keywords)} {' '.join(memory.tags)}"
             self.retriever.add_documents([memory.content + " , " + metadata_text])
 
@@ -537,6 +539,8 @@ class RobustAgenticMemorySystem:
                     if upd["context"]:
                         notetmp.context = upd["context"]
                     self.memories[notes_id[memorytmp_idx]] = notetmp
+                    if self.refresh_index:
+                        self.retriever.update_document(memorytmp_idx, note_document(notetmp))
 
             return True, note
 

@@ -27,6 +27,11 @@ def valid_link(i, n: int) -> bool:
     """True if i can index a memory list of length n (bool and negative indices are rejected)."""
     return isinstance(i, (int, np.integer)) and not isinstance(i, bool) and 0 <= i < n
 
+def note_document(note) -> str:
+    """The text add_note embeds for a memory note."""
+    return ("content:" + note.content + " context:" + note.context + " keywords: " + ", ".join(note.keywords)
+            + " tags: " + ", ".join(note.tags))
+
 def simple_tokenize(text):
     return word_tokenize(text)
 
@@ -623,6 +628,14 @@ class SimpleEmbeddingRetriever:
         
             
         return top_k_indices
+
+    def update_document(self, idx: int, document: str):
+        """Replace document idx and its embedding in place."""
+        if self.document_ids.get(self.corpus[idx]) == idx:
+            del self.document_ids[self.corpus[idx]]
+        self.corpus[idx] = document
+        self.embeddings[idx] = self.model.encode([document])[0]
+        self.document_ids[document] = idx
         
     def save(self, retriever_cache_file: str, retriever_cache_embeddings_file: str):
         """Save retriever state to disk"""
@@ -688,8 +701,12 @@ class AgenticMemorySystem:
                  api_key: Optional[str] = None,
                  api_base: Optional[str] = None,
                  sglang_host: str = "http://localhost",
-                 sglang_port: int = 30000):
+                 sglang_port: int = 30000,
+                 refresh_index: bool = False):
         self.memories = {}  # id -> MemoryNote
+        # re-embed neighbours as soon as evolution updates them; otherwise their embeddings stay
+        # stale until consolidate_memories runs every evo_threshold evolutions (paper behaviour)
+        self.refresh_index = refresh_index
         self.retriever = SimpleEmbeddingRetriever(model_name)
         self.llm_controller = LLMController(llm_backend, llm_model, api_key, api_base, sglang_host, sglang_port)
         self.evolution_system_prompt = '''
@@ -734,7 +751,7 @@ class AgenticMemorySystem:
         # all_docs = [m.content for m in self.memories.values()]
         evo_label, note = self.process_memory(note)
         self.memories[note.id] = note
-        self.retriever.add_documents(["content:" + note.content + " context:" + note.context + " keywords: " + ", ".join(note.keywords) + " tags: " + ", ".join(note.tags)])
+        self.retriever.add_documents([note_document(note)])
         if evo_label == True:
             self.evo_cnt += 1
             if self.evo_cnt % self.evo_threshold == 0:
@@ -760,6 +777,9 @@ class AgenticMemorySystem:
         
         # Re-add all memory documents with their metadata
         for memory in self.memories.values():
+            if self.refresh_index:  # the same document format as add_note
+                self.retriever.add_documents([note_document(memory)])
+                continue
             # Combine memory metadata into a single searchable document
             metadata_text = f"{memory.context} {' '.join(memory.keywords)} {' '.join(memory.tags)}"
             # Add both the content and metadata as separate documents for better retrieval
@@ -877,6 +897,8 @@ class AgenticMemorySystem:
                         if context:
                             notetmp.context = context
                         self.memories[notes_id[memorytmp_idx]] = notetmp
+                        if self.refresh_index:
+                            self.retriever.update_document(memorytmp_idx, note_document(notetmp))
         return should_evolve,note
 
     def find_related_memories(self, query: str, k: int = 5) -> List[MemoryNote]:
