@@ -1,6 +1,7 @@
 from ast import Str
 from typing import List, Dict, Optional, Literal, Any, Union
 import json
+import re
 from datetime import datetime
 import uuid
 from rank_bm25 import BM25Okapi
