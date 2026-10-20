@@ -8,7 +8,7 @@ Usage:
 """
 
 from memory_layer_robust import RobustLLMController, RobustAgenticMemorySystem
-from memory_layer import FAILURES, valid_link
+from memory_layer import FAILURES, valid_link, cache_is_current, mark_cache
 from llm_text_parsers import (
     parse_plain_text_answer,
     parse_relevant_parts,
@@ -109,7 +109,8 @@ Keywords:"""
         logger.debug("generate_query_llm response: %s", result)
         return result
 
-    def answer_question(self, question: str, category: int, answer: str) -> tuple:
+    def answer_question(self, question: str, category: int, answer: str,
+                        rng: Optional[random.Random] = None) -> tuple:
         """Generate answer for a question — plain text, no JSON schema."""
         keywords = self.generate_query_llm(question)
         raw_context = self.retrieve_memory(keywords, k=self.retrieve_k)
@@ -119,7 +120,7 @@ Keywords:"""
 
         if category == 5:
             answer_tmp = list()
-            if random.random() < 0.5:
+            if (rng or random).random() < 0.5:
                 answer_tmp.append('Not mentioned in the conversation')
                 answer_tmp.append(answer)
             else:
@@ -173,10 +174,12 @@ def pool_memories(agents: List[RobustAdvancedMemAgent]) -> RobustAdvancedMemAgen
             memories[note.id] = note
         corpus.extend(retriever.corpus)
         embeddings.append(retriever.embeddings)
+    embeddings = np.vstack(embeddings)
+    assert len(memories) == len(corpus) == len(embeddings), "duplicate note ids across conversations"
     pooled = agents[0]
     pooled.memory_system.memories = memories
     pooled.memory_system.retriever.corpus = corpus
-    pooled.memory_system.retriever.embeddings = np.vstack(embeddings)
+    pooled.memory_system.retriever.embeddings = embeddings
     pooled.memory_system.retriever.document_ids = {doc: i for i, doc in enumerate(corpus)}
     return pooled
 
@@ -207,14 +210,14 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                      refresh_index: bool = False, memory_scope: str = "conversation"):
     """Evaluate the robust agent on the LoComo dataset."""
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
-    log_filename = f"eval_robust_{model}_{backend}_ratio{ratio}_{timestamp}.log"
+    log_filename = f"eval_robust_{model}_{backend}_ratio{ratio}_{memory_scope}_{timestamp}.log"
     log_path = os.path.join(os.path.dirname(__file__), "logs", log_filename)
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
     eval_logger = setup_logger(log_path)
     eval_logger.info(f"Loading dataset from {dataset_path}")
     eval_logger.info(f"Using ROBUST memory layer (no JSON schema dependency)")
-    random.seed(seed)  # the order of the two category-5 options
+    FAILURES.clear()
 
     samples = load_locomo_dataset(dataset_path)
     eval_logger.info(f"Loaded {len(samples)} samples")
@@ -238,6 +241,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     )
     os.makedirs(memories_dir, exist_ok=True)
     allow_categories = [1, 2, 3, 4, 5]
+    cached_samples, stale_cache_samples = [], []
 
     def load_or_build(sample_idx, sample):
         """An agent holding this conversation's memory, loaded from the cache or built and cached."""
@@ -266,6 +270,11 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                     cached_memories, 'all-MiniLM-L6-v2'
                 )
             eval_logger.info(f"Successfully loaded {len(cached_memories)} memories")
+            cached_samples.append(sample_idx)
+            if not cache_is_current(memory_cache_file):
+                stale_cache_samples.append(sample_idx)
+                eval_logger.warning(f"Memories of sample {sample_idx} were cached by another version of the memory "
+                                    f"layer; delete {memories_dir} to rebuild them")
         else:
             eval_logger.info(f"No cached memories found for sample {sample_idx}. Creating new memories.")
 
@@ -279,6 +288,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
             with open(memory_cache_file, 'wb') as f:
                 pickle.dump(memories_to_cache, f)
             agent.memory_system.retriever.save(retriever_cache_file, retriever_cache_embeddings_file)
+            mark_cache(memory_cache_file)
             eval_logger.info(f"Successfully cached {len(memories_to_cache)} memories")
         return agent
 
@@ -294,13 +304,15 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
 
         eval_logger.info(f"Processing sample {sample_idx + 1}/{len(samples)}")
 
-        for qa in sample.qa:
+        for qa_idx, qa in enumerate(sample.qa):
             if int(qa.category) in allow_categories:
                 total_questions += 1
                 category_counts[qa.category] += 1
 
+                # the category-5 option order comes from the question's own generator
+                rng = random.Random(f"{seed}:{sample_idx}:{qa_idx}")
                 prediction, user_prompt, raw_context = agent.answer_question(
-                    qa.question, qa.category, qa.final_answer
+                    qa.question, qa.category, qa.final_answer, rng
                 )
 
                 # Parse the prediction (handles both JSON and plain text)
@@ -343,10 +355,14 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
             str(cat): count for cat, count in category_counts.items()
         },
         "aggregate_metrics": aggregate_results,
+        "ratio": ratio,
         "seed": seed,
         "legacy_c5_reference": legacy_c5_reference,
         "refresh_index": refresh_index,
         "memory_scope": memory_scope,
+        "pooled_notes": len(pooled_agent.memory_system.memories) if memory_scope == "pooled" else None,
+        "cached_samples": cached_samples,
+        "stale_cache_samples": stale_cache_samples,
         # failures absorbed in this run (memories loaded from the cache were built earlier);
         # "answer" counts questions scored as empty predictions because the call failed
         "llm_failures": dict(FAILURES),

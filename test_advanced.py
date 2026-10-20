@@ -1,4 +1,4 @@
-from memory_layer import LLMController, AgenticMemorySystem, FAILURES
+from memory_layer import LLMController, AgenticMemorySystem, FAILURES, cache_is_current, mark_cache
 import os
 import json
 import argparse
@@ -126,7 +126,7 @@ class advancedMemAgent:
             response = response.strip()
         return response
 
-    def answer_question(self, question: str, category: int, answer: str) -> str:
+    def answer_question(self, question: str, category: int, answer: str, rng: Optional[random.Random] = None) -> str:
         """Generate answer for a question given the conversation context."""
         keywords = self.generate_query_llm(question)
         # if category == 3:
@@ -148,7 +148,7 @@ class advancedMemAgent:
         temperature = 0.7
         if category == 5: # adversial question, follow the initial paper.
             answer_tmp = list()
-            if random.random() < 0.5:
+            if (rng or random).random() < 0.5:
                 answer_tmp.append('Not mentioned in the conversation')
                 answer_tmp.append(answer)
             else:
@@ -235,7 +235,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     
     logger = setup_logger(log_path)
     logger.info(f"Loading dataset from {dataset_path}")
-    random.seed(seed)  # the order of the two category-5 options
+    FAILURES.clear()
     
     # Load dataset
     samples = load_locomo_dataset(dataset_path)
@@ -261,6 +261,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         backend, model, "_refresh" if refresh_index else ""))
     os.makedirs(memories_dir, exist_ok=True)
     allow_categories = [1,2,3,4,5]
+    cached_samples, stale_cache_samples = [], []
     for sample_idx, sample in enumerate(samples):
         agent = advancedMemAgent(model, backend, retrieve_k, temperature_c5, sglang_host, sglang_port, refresh_index)
         # Create memory cache filename based on sample and session indices
@@ -295,6 +296,11 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                 agent.memory_system.retriever = agent.memory_system.retriever.load_from_local_memory(cached_memories, 'all-MiniLM-L6-v2')
             print(agent.memory_system.retriever.corpus)
             logger.info(f"Successfully loaded {len(cached_memories)} memories")
+            cached_samples.append(sample_idx)
+            if not cache_is_current(memory_cache_file):
+                stale_cache_samples.append(sample_idx)
+                logger.warning(f"Memories of sample {sample_idx} were cached by another version of the memory "
+                               f"layer; delete {memories_dir} to rebuild them")
             # except Exception as e:
             #     logger.info(f"Error loading cached memories: {e}. Will recreate memories.")
             #     cached_memories = None
@@ -316,17 +322,19 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
             with open(memory_cache_file, 'wb') as f:
                 pickle.dump(memories_to_cache, f)
             agent.memory_system.retriever.save(retriever_cache_file,retriever_cache_embeddings_file)
+            mark_cache(memory_cache_file)
             logger.info(f"\nSuccessfully cached {len(memories_to_cache)} memories")
             
         logger.info(f"\nProcessing sample {sample_idx + 1}/{len(samples)}")
         
-        for qa in sample.qa:
+        for qa_idx, qa in enumerate(sample.qa):
             if int(qa.category) in allow_categories:
                 total_questions += 1
                 category_counts[qa.category] += 1
                 
-                # Generate prediction
-                prediction, user_prompt,raw_context = agent.answer_question(qa.question,qa.category,qa.final_answer)
+                # Generate prediction; the category-5 option order comes from the question's own generator
+                rng = random.Random(f"{seed}:{sample_idx}:{qa_idx}")
+                prediction, user_prompt,raw_context = agent.answer_question(qa.question,qa.category,qa.final_answer,rng)
                 try:
                     prediction = json.loads(prediction)["answer"]
                 except:
@@ -373,8 +381,11 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
             str(cat): count for cat, count in category_counts.items()
         },
         "aggregate_metrics": aggregate_results,
+        "ratio": ratio,
         "seed": seed,
         "legacy_c5_reference": legacy_c5_reference,
+        "cached_samples": cached_samples,
+        "stale_cache_samples": stale_cache_samples,
         "refresh_index": refresh_index,
         # failures absorbed in this run (memories loaded from the cache were built earlier)
         "llm_failures": dict(FAILURES),
