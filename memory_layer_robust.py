@@ -262,6 +262,17 @@ class RobustLLMController:
         else:
             raise ValueError("Backend must be 'openai', 'ollama', 'sglang', or 'vllm'")
 
+        # an empty completion falls back to defaults downstream (heuristic metadata, no evolution, an empty
+        # prediction): count it, so a run with many of them does not look like a clean low score
+        call = self.llm.get_completion
+
+        def counted(prompt: str, temperature: float = 0.7) -> str:
+            out = call(prompt, temperature=temperature)
+            if not out or not str(out).strip():
+                FAILURES["empty_completion"] += 1
+            return out
+        self.llm.get_completion = counted
+
         if check_connection:
             self.llm.check_connectivity()
 
@@ -520,32 +531,39 @@ class RobustAgenticMemorySystem:
 
             # ---- Call 3: Update neighbors (conditional) ----
             if should_update:
-                update_prompt = UPDATE_NEIGHBORS_PROMPT.format(
-                    content=note.content,
-                    context=note.context,
-                    nearest_neighbors_memories=neighbor_memory,
-                    max_neighbor_idx=len(indices) - 1,
-                    neighbor_count=len(indices),
-                )
-                update_response = self.llm_controller.llm.get_completion(update_prompt)
-                neighbor_updates = parse_update_neighbors(update_response, len(indices))
-                logger.debug("Neighbor updates: %s", neighbor_updates)
+                try:
+                    update_prompt = UPDATE_NEIGHBORS_PROMPT.format(
+                        content=note.content,
+                        context=note.context,
+                        nearest_neighbors_memories=neighbor_memory,
+                        max_neighbor_idx=len(indices) - 1,
+                        neighbor_count=len(indices),
+                    )
+                    update_response = self.llm_controller.llm.get_completion(update_prompt)
+                    neighbor_updates = parse_update_neighbors(update_response, len(indices))
+                    logger.debug("Neighbor updates: %s", neighbor_updates)
 
-                noteslist = list(self.memories.values())
-                notes_id = list(self.memories.keys())
-                for i in range(min(len(indices), len(neighbor_updates))):
-                    upd = neighbor_updates[i]
-                    memorytmp_idx = indices[i]
-                    if memorytmp_idx >= len(noteslist):
-                        continue
-                    notetmp = noteslist[memorytmp_idx]
-                    if upd["tags"]:
-                        notetmp.tags = upd["tags"]
-                    if upd["context"]:
-                        notetmp.context = upd["context"]
-                    self.memories[notes_id[memorytmp_idx]] = notetmp
-                    if self.refresh_index:
-                        self.retriever.update_document(memorytmp_idx, note_document(notetmp))
+                    noteslist = list(self.memories.values())
+                    notes_id = list(self.memories.keys())
+                    for i in range(min(len(indices), len(neighbor_updates))):
+                        upd = neighbor_updates[i]
+                        memorytmp_idx = indices[i]
+                        if memorytmp_idx >= len(noteslist):
+                            continue
+                        notetmp = noteslist[memorytmp_idx]
+                        if upd["tags"]:
+                            notetmp.tags = upd["tags"]
+                        if upd["context"]:
+                            notetmp.context = upd["context"]
+                        self.memories[notes_id[memorytmp_idx]] = notetmp
+                        if self.refresh_index:
+                            self.retriever.update_document(memorytmp_idx, note_document(notetmp))
+
+                except Exception as e:  # keep what the strengthen step already applied
+                    logger.error("Neighbour update failed for note %s: %s", note.id, e)
+                    FAILURES["evolve"] += 1
+                    if not should_strengthen:
+                        return False, note
 
             return True, note
 

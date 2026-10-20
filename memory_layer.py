@@ -901,6 +901,16 @@ class AgenticMemorySystem:
             FAILURES["evolve"] += 1
             # Return default values for failed parsing
             return False, note
+        # validate before changing anything, so a malformed decision leaves the note and its neighbours as they were
+        required = {"strengthen": ("suggested_connections", "tags_to_update"),
+                    "update_neighbor": ("new_context_neighborhood", "new_tags_neighborhood")}
+        if not isinstance(response_json, dict) or "should_evolve" not in response_json:
+            raise ValueError(f"evolution decision without should_evolve: {response_json!r:.200}")
+        if response_json["should_evolve"]:
+            missing = [k for a in response_json.get("actions") or [] for k in required.get(a, ())
+                       if not isinstance(response_json.get(k), list)]
+            if missing:
+                raise ValueError(f"evolution decision without {missing}")
         should_evolve = response_json["should_evolve"]
         if should_evolve:
             actions = response_json["actions"]

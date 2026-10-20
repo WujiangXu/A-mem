@@ -164,11 +164,14 @@ def calculate_metrics(prediction: str, reference: str) -> Dict[str, float]:
 
     return metrics
 
-def is_not_mentioned(prediction: str) -> int:
+def is_not_mentioned(prediction: str, trap: str = None) -> int:
     """1 if the prediction says the answer is not in the conversation, the correct response to a
-    category-5 (adversarial) question."""
+    category-5 (adversarial) question, and does not also give the trap answer."""
     text = str(prediction).lower()
-    return int("not mentioned" in text or "no information available" in text)
+    declines = "not mentioned" in text or "no information available" in text
+    trap = str(trap or "").lower().strip(" .")
+    gives_trap = bool(trap) and not trap.startswith("not mentioned") and trap in text
+    return int(declines and not gives_trap)
 
 def score_prediction(prediction: str, qa: QA, legacy_c5: bool = False):
     """Return (reference, metrics) for one question. Category 5 is scored against
@@ -177,7 +180,7 @@ def score_prediction(prediction: str, qa: QA, legacy_c5: bool = False):
     reference = qa.reference(legacy_c5)
     metrics = calculate_metrics(prediction, reference)
     if qa.category == 5:
-        metrics["adversarial_correct"] = is_not_mentioned(prediction)
+        metrics["adversarial_correct"] = is_not_mentioned(prediction, qa.adversarial_answer)
     return reference, metrics
 
 def aggregate_metrics(all_metrics: List[Dict[str, float]], all_categories: List[int]) -> Dict[str, Dict[str, Union[float, Dict[str, float]]]]:

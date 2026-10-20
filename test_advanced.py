@@ -293,7 +293,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                 agent.memory_system.retriever = agent.memory_system.retriever.load(retriever_cache_file,retriever_cache_embeddings_file)
             else:
                 print(f"No retriever cache found at {retriever_cache_file}, loading from memory")
-                agent.memory_system.retriever = agent.memory_system.retriever.load_from_local_memory(cached_memories, 'all-MiniLM-L6-v2')
+                agent.memory_system.consolidate_memories()  # the document format of this memory system
             print(agent.memory_system.retriever.corpus)
             logger.info(f"Successfully loaded {len(cached_memories)} memories")
             cached_samples.append(sample_idx)
