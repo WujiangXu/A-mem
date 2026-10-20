@@ -518,12 +518,16 @@ class RobustAgenticMemorySystem:
                 strengthen = parse_strengthen_details(strengthen_response)
                 logger.debug("Strengthen details: %s", strengthen)
 
-                # keep only the shown neighbours' "memory index" values: an out-of-range id breaks
-                # retrieval, and any other id points at a memory the LLM never saw
-                shown = {int(i) for i in indices}
+                # links go to shown neighbours only. The prompt asks for "neighbor indices" (example "0, 2, 3") while
+                # listing each neighbour's "memory index", so an id is read as a shown memory index first and else as a
+                # position in the neighbour list; storing positions as memory indices linked the conversation's first
+                # notes. Any other id is dropped and counted.
+                shown = [int(i) for i in indices]
                 for c in map(as_index, strengthen["connections"]):
                     if c in shown:
                         note.links.append(c)
+                    elif c is not None and 0 <= c < len(shown):
+                        note.links.append(shown[c])
                     else:
                         FAILURES["invalid_link"] += 1
                 if strengthen["tags"]:
