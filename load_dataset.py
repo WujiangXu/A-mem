@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+# The correct response to a category-5 (adversarial) question: the conversation does not contain the answer.
+NOT_MENTIONED = "Not mentioned in the conversation"
+
 @dataclass
 class QA:
     question: str
@@ -15,9 +18,19 @@ class QA:
 
     @property
     def final_answer(self) -> Optional[str]:
-        """Get the appropriate answer based on category."""
+        """The answer offered to the model in the prompt. For category 5 this is the adversarial
+        (wrong) option; score predictions against `reference()`, not against this."""
         if self.category == 5:
             return self.adversarial_answer
+        return self.answer
+
+    def reference(self, legacy_c5: bool = False) -> Optional[str]:
+        """The gold answer to score against. Category-5 questions cannot be answered from the
+        conversation (444 of the 446 have no `answer` field), so the correct response is
+        NOT_MENTIONED. legacy_c5=True returns the adversarial answer instead, which is how
+        the evaluation behind the paper's numbers scored category 5."""
+        if self.category == 5:
+            return self.adversarial_answer if legacy_c5 else NOT_MENTIONED
         return self.answer
 
 @dataclass

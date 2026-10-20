@@ -161,8 +161,24 @@ def calculate_metrics(prediction: str, reference: str) -> Dict[str, float]:
         "meteor": meteor,
         "sbert_similarity": sbert_similarity
     }
-    
+
     return metrics
+
+def is_not_mentioned(prediction: str) -> int:
+    """1 if the prediction says the answer is not in the conversation, the correct response to a
+    category-5 (adversarial) question."""
+    text = str(prediction).lower()
+    return int("not mentioned" in text or "no information available" in text)
+
+def score_prediction(prediction: str, qa: QA, legacy_c5: bool = False):
+    """Return (reference, metrics) for one question. Category 5 is scored against
+    "Not mentioned in the conversation" (or, with legacy_c5, against the adversarial answer as
+    in the paper's evaluation) and also gets `adversarial_correct`."""
+    reference = qa.reference(legacy_c5)
+    metrics = calculate_metrics(prediction, reference)
+    if qa.category == 5:
+        metrics["adversarial_correct"] = is_not_mentioned(prediction)
+    return reference, metrics
 
 def aggregate_metrics(all_metrics: List[Dict[str, float]], all_categories: List[int]) -> Dict[str, Dict[str, Union[float, Dict[str, float]]]]:
     """Calculate aggregate statistics for all metrics, split by category."""

@@ -17,7 +17,7 @@ from collections import defaultdict
 import pickle
 import random
 from tqdm import tqdm
-from utils import calculate_metrics, aggregate_metrics
+from utils import calculate_metrics, aggregate_metrics, score_prediction
 from datetime import datetime
 
 # Download required NLTK data
@@ -214,7 +214,7 @@ def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
     
     return logger
 
-def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] = None, ratio: float = 1.0, backend: str = "sglang", temperature_c5: float = 0.5, retrieve_k: int = 10, sglang_host: str = "http://localhost", sglang_port: int = 30000):
+def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] = None, ratio: float = 1.0, backend: str = "sglang", temperature_c5: float = 0.5, retrieve_k: int = 10, sglang_host: str = "http://localhost", sglang_port: int = 30000, legacy_c5_reference: bool = False):
     """Evaluate the agent on the LoComo dataset.
     
     Args:
@@ -329,20 +329,14 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                     prediction = prediction
                     logger.info(f"Failed to parse prediction as JSON: {prediction}")
                     error_num += 1
+                reference, metrics = score_prediction(prediction, qa, legacy_c5_reference)
                 # Log results
                 logger.info(f"\nQuestion {total_questions}: {qa.question}")
                 logger.info(f"Prediction: {prediction}")
-                logger.info(f"Reference: {qa.final_answer}")
+                logger.info(f"Reference: {reference}")
                 logger.info(f"User Prompt: {user_prompt}")
                 logger.info(f"Category: {qa.category}")
                 logger.info(f"Raw Context: {raw_context}")
-                
-                # Calculate metrics
-                metrics = calculate_metrics(prediction, qa.final_answer) if qa.final_answer else {
-                    "exact_match": 0, "f1": 0.0, "rouge1_f": 0.0, "rouge2_f": 0.0, 
-                    "rougeL_f": 0.0, "bleu1": 0.0, "bleu2": 0.0, "bleu3": 0.0, 
-                    "bleu4": 0.0, "bert_f1": 0.0, "meteor": 0.0, "sbert_similarity": 0.0
-                }
                 
                 all_metrics.append(metrics)
                 all_categories.append(qa.category)
@@ -352,8 +346,9 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                     "sample_id": sample_idx,
                     "question": qa.question,
                     "prediction": prediction,
-                    "reference": qa.final_answer,
+                    "reference": reference,
                     "category": qa.category,
+                    "adversarial_answer": qa.adversarial_answer,
                     "metrics": metrics
                 }
                 results.append(result)
@@ -420,6 +415,9 @@ def main():
                       help="SGLang server host (for sglang backend)")
     parser.add_argument("--sglang_port", type=int, default=30000,
                       help="SGLang server port (for sglang backend)")
+    parser.add_argument("--legacy_c5_reference", action="store_true",
+                      help="Score category 5 against the adversarial answer, as the paper's evaluation did "
+                           "(default: against 'Not mentioned in the conversation', the correct response)")
     args = parser.parse_args()
     
     if args.ratio <= 0.0 or args.ratio > 1.0:
@@ -432,7 +430,7 @@ def main():
     else:
         output_path = None
     
-    evaluate_dataset(dataset_path, args.model, output_path, args.ratio, args.backend, args.temperature_c5, args.retrieve_k, args.sglang_host, args.sglang_port)
+    evaluate_dataset(dataset_path, args.model, output_path, args.ratio, args.backend, args.temperature_c5, args.retrieve_k, args.sglang_host, args.sglang_port, args.legacy_c5_reference)
 
 if __name__ == "__main__":
     main()
