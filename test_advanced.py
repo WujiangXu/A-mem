@@ -1,4 +1,4 @@
-from memory_layer import LLMController, AgenticMemorySystem
+from memory_layer import LLMController, AgenticMemorySystem, FAILURES
 import os
 import json
 import argparse
@@ -214,7 +214,7 @@ def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
     
     return logger
 
-def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] = None, ratio: float = 1.0, backend: str = "sglang", temperature_c5: float = 0.5, retrieve_k: int = 10, sglang_host: str = "http://localhost", sglang_port: int = 30000, legacy_c5_reference: bool = False):
+def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] = None, ratio: float = 1.0, backend: str = "sglang", temperature_c5: float = 0.5, retrieve_k: int = 10, sglang_host: str = "http://localhost", sglang_port: int = 30000, legacy_c5_reference: bool = False, seed: int = 42):
     """Evaluate the agent on the LoComo dataset.
     
     Args:
@@ -233,6 +233,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     
     logger = setup_logger(log_path)
     logger.info(f"Loading dataset from {dataset_path}")
+    random.seed(seed)  # the order of the two category-5 options
     
     # Load dataset
     samples = load_locomo_dataset(dataset_path)
@@ -369,9 +370,15 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
             str(cat): count for cat, count in category_counts.items()
         },
         "aggregate_metrics": aggregate_results,
+        "seed": seed,
+        "legacy_c5_reference": legacy_c5_reference,
+        # failures absorbed in this run (memories loaded from the cache were built earlier)
+        "llm_failures": dict(FAILURES),
+        "answer_parse_errors": error_num,
         "individual_results": results
     }
     logger.info(f"Error number: {error_num}")
+    logger.info(f"LLM failures absorbed in this run: {dict(FAILURES) or 'none'}")
     # Save results
     if output_path:
         with open(output_path, 'w') as f:
@@ -418,6 +425,8 @@ def main():
     parser.add_argument("--legacy_c5_reference", action="store_true",
                       help="Score category 5 against the adversarial answer, as the paper's evaluation did "
                            "(default: against 'Not mentioned in the conversation', the correct response)")
+    parser.add_argument("--seed", type=int, default=42,
+                      help="Random seed for the order of the two category-5 answer options")
     args = parser.parse_args()
     
     if args.ratio <= 0.0 or args.ratio > 1.0:
@@ -430,7 +439,7 @@ def main():
     else:
         output_path = None
     
-    evaluate_dataset(dataset_path, args.model, output_path, args.ratio, args.backend, args.temperature_c5, args.retrieve_k, args.sglang_host, args.sglang_port, args.legacy_c5_reference)
+    evaluate_dataset(dataset_path, args.model, output_path, args.ratio, args.backend, args.temperature_c5, args.retrieve_k, args.sglang_host, args.sglang_port, args.legacy_c5_reference, args.seed)
 
 if __name__ == "__main__":
     main()
