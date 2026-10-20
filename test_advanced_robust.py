@@ -8,7 +8,7 @@ Usage:
 """
 
 from memory_layer_robust import RobustLLMController, RobustAgenticMemorySystem
-from memory_layer import FAILURES
+from memory_layer import FAILURES, valid_link
 from llm_text_parsers import (
     parse_plain_text_answer,
     parse_relevant_parts,
@@ -27,6 +27,7 @@ from sentence_transformers import SentenceTransformer
 from sentence_transformers.util import pytorch_cos_sim
 import statistics
 from collections import defaultdict
+import copy
 import pickle
 import random
 from tqdm import tqdm
@@ -156,6 +157,30 @@ Question: {question} Short answer:"""
         return response, user_prompt, raw_context
 
 
+def pool_memories(agents: List[RobustAdvancedMemAgent]) -> RobustAdvancedMemAgent:
+    """One agent whose memory is the union of the given agents' memories (--memory_scope pooled).
+    Notes and their retriever rows (the same texts and embeddings) are appended conversation by
+    conversation, and each note's links are offset to its position in the pooled list."""
+    memories, corpus, embeddings = {}, [], []
+    for agent in agents:
+        notes = list(agent.memory_system.memories.values())
+        retriever = agent.memory_system.retriever
+        assert len(notes) == len(retriever.corpus) == len(retriever.embeddings), "memory and retriever out of sync"
+        offset = len(memories)
+        for note in notes:
+            note = copy.copy(note)
+            note.links = [link + offset for link in note.links if valid_link(link, len(notes))]
+            memories[note.id] = note
+        corpus.extend(retriever.corpus)
+        embeddings.append(retriever.embeddings)
+    pooled = agents[0]
+    pooled.memory_system.memories = memories
+    pooled.memory_system.retriever.corpus = corpus
+    pooled.memory_system.retriever.embeddings = np.vstack(embeddings)
+    pooled.memory_system.retriever.document_ids = {doc: i for i, doc in enumerate(corpus)}
+    return pooled
+
+
 def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
     """Set up logging configuration."""
     eval_logger = logging.getLogger('locomo_eval_robust')
@@ -179,7 +204,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                      temperature_c5: float = 0.5, retrieve_k: int = 10,
                      sglang_host: str = "http://localhost", sglang_port: int = 30000,
                      legacy_c5_reference: bool = False, seed: int = 42,
-                     refresh_index: bool = False):
+                     refresh_index: bool = False, memory_scope: str = "conversation"):
     """Evaluate the robust agent on the LoComo dataset."""
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
     log_filename = f"eval_robust_{model}_{backend}_ratio{ratio}_{timestamp}.log"
@@ -214,7 +239,8 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     os.makedirs(memories_dir, exist_ok=True)
     allow_categories = [1, 2, 3, 4, 5]
 
-    for sample_idx, sample in enumerate(samples):
+    def load_or_build(sample_idx, sample):
+        """An agent holding this conversation's memory, loaded from the cache or built and cached."""
         agent = RobustAdvancedMemAgent(model, backend, retrieve_k, temperature_c5,
                                        sglang_host, sglang_port, refresh_index)
 
@@ -254,6 +280,17 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                 pickle.dump(memories_to_cache, f)
             agent.memory_system.retriever.save(retriever_cache_file, retriever_cache_embeddings_file)
             eval_logger.info(f"Successfully cached {len(memories_to_cache)} memories")
+        return agent
+
+    if memory_scope == "pooled":
+        # every evaluated conversation's memory in one store: retrieval must also reject the
+        # other conversations' notes (issue #27); built from the same per-conversation caches
+        pooled_agent = pool_memories([load_or_build(i, s) for i, s in enumerate(samples)])
+        eval_logger.info(f"Pooled memory: {len(pooled_agent.memory_system.memories)} notes "
+                         f"from {len(samples)} conversations")
+
+    for sample_idx, sample in enumerate(samples):
+        agent = pooled_agent if memory_scope == "pooled" else load_or_build(sample_idx, sample)
 
         eval_logger.info(f"Processing sample {sample_idx + 1}/{len(samples)}")
 
@@ -309,6 +346,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         "seed": seed,
         "legacy_c5_reference": legacy_c5_reference,
         "refresh_index": refresh_index,
+        "memory_scope": memory_scope,
         # failures absorbed in this run (memories loaded from the cache were built earlier);
         # "answer" counts questions scored as empty predictions because the call failed
         "llm_failures": dict(FAILURES),
@@ -370,6 +408,11 @@ def main():
                         help="Re-embed neighbour memories as soon as evolution updates them (default: their "
                              "embeddings refresh only every evo_threshold evolutions, as in the paper). Builds "
                              "its own memory cache")
+    parser.add_argument("--memory_scope", choices=["conversation", "pooled"], default="conversation",
+                        help="conversation: each question is answered from its own conversation's memory "
+                             "(LoCoMo's protocol, as in the paper). pooled: from one memory holding all "
+                             "evaluated conversations, so retrieval must also reject other conversations' "
+                             "notes (uses the same memory caches)")
     args = parser.parse_args()
 
     if args.ratio <= 0.0 or args.ratio > 1.0:
@@ -382,7 +425,7 @@ def main():
         dataset_path, args.model, output_path, args.ratio,
         args.backend, args.temperature_c5, args.retrieve_k,
         args.sglang_host, args.sglang_port, args.legacy_c5_reference, args.seed,
-        args.refresh_index,
+        args.refresh_index, args.memory_scope,
     )
 
 
