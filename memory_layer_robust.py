@@ -21,7 +21,7 @@ import functools
 from datetime import datetime
 from abc import ABC, abstractmethod
 
-from memory_layer import SimpleEmbeddingRetriever, simple_tokenize
+from memory_layer import SimpleEmbeddingRetriever, simple_tokenize, FAILURES, valid_link, note_document, as_index
 from llm_text_parsers import (
     ANALYZE_CONTENT_PROMPT,
     EVOLUTION_DECISION_PROMPT,
@@ -262,6 +262,17 @@ class RobustLLMController:
         else:
             raise ValueError("Backend must be 'openai', 'ollama', 'sglang', or 'vllm'")
 
+        # an empty completion falls back to defaults downstream (heuristic metadata, no evolution, an empty
+        # prediction): count it, so a run with many of them does not look like a clean low score
+        call = self.llm.get_completion
+
+        def counted(prompt: str, temperature: float = 0.7) -> str:
+            out = call(prompt, temperature=temperature)
+            if not out or not str(out).strip():
+                FAILURES["empty_completion"] += 1
+            return out
+        self.llm.get_completion = counted
+
         if check_connection:
             self.llm.check_connectivity()
 
@@ -336,6 +347,7 @@ class RobustMemoryNote:
 
         except Exception as e:
             logger.error("Error analyzing content: %s", e)
+            FAILURES["analyze"] += 1
             # Graceful degradation: heuristic keywords/context
             from llm_text_parsers import _heuristic_keywords, _heuristic_context
             return {
@@ -361,9 +373,13 @@ class RobustAgenticMemorySystem:
                  api_base: Optional[str] = None,
                  sglang_host: str = "http://localhost",
                  sglang_port: int = 30000,
-                 check_connection: bool = False):
+                 check_connection: bool = False,
+                 refresh_index: bool = False):
 
         self.memories: Dict[str, RobustMemoryNote] = {}
+        # re-embed neighbours as soon as evolution updates them; otherwise their embeddings stay
+        # stale until consolidate_memories runs every evo_threshold evolutions (paper behaviour)
+        self.refresh_index = refresh_index
         self.retriever = SimpleEmbeddingRetriever(model_name)
         self.llm_controller = RobustLLMController(
             llm_backend, llm_model, api_key, api_base,
@@ -384,12 +400,7 @@ class RobustAgenticMemorySystem:
         )
         evo_label, note = self.process_memory(note)
         self.memories[note.id] = note
-        self.retriever.add_documents([
-            "content:" + note.content +
-            " context:" + note.context +
-            " keywords: " + ", ".join(note.keywords) +
-            " tags: " + ", ".join(note.tags)
-        ])
+        self.retriever.add_documents([note_document(note)])
         if evo_label:
             self.evo_cnt += 1
             if self.evo_cnt % self.evo_threshold == 0:
@@ -405,6 +416,9 @@ class RobustAgenticMemorySystem:
 
         self.retriever = SimpleEmbeddingRetriever(model_name)
         for memory in self.memories.values():
+            if self.refresh_index:  # the same document format as add_note
+                self.retriever.add_documents([note_document(memory)])
+                continue
             metadata_text = f"{memory.context} {' '.join(memory.keywords)} {' '.join(memory.tags)}"
             self.retriever.add_documents([memory.content + " , " + metadata_text])
 
@@ -446,6 +460,8 @@ class RobustAgenticMemorySystem:
             )
             neighborhood = all_memories[i].links
             for neighbor in neighborhood:
+                if not valid_link(neighbor, len(all_memories)):  # e.g. memories cached before link validation
+                    continue
                 memory_str += (
                     "talk start time:" + all_memories[neighbor].timestamp +
                     "memory content: " + all_memories[neighbor].content +
@@ -502,39 +518,60 @@ class RobustAgenticMemorySystem:
                 strengthen = parse_strengthen_details(strengthen_response)
                 logger.debug("Strengthen details: %s", strengthen)
 
-                note.links.extend(strengthen["connections"])
+                # links go to shown neighbours only. The prompt asks for "neighbor indices" (example "0, 2, 3") while
+                # listing each neighbour's "memory index", so an id is read as a shown memory index first and else as a
+                # position in the neighbour list; storing positions as memory indices linked the conversation's first
+                # notes. Any other id is dropped and counted.
+                shown = [int(i) for i in indices]
+                for c in map(as_index, strengthen["connections"]):
+                    if c in shown:
+                        note.links.append(c)
+                    elif c is not None and 0 <= c < len(shown):
+                        note.links.append(shown[c])
+                    else:
+                        FAILURES["invalid_link"] += 1
                 if strengthen["tags"]:
                     note.tags = strengthen["tags"]
 
             # ---- Call 3: Update neighbors (conditional) ----
             if should_update:
-                update_prompt = UPDATE_NEIGHBORS_PROMPT.format(
-                    content=note.content,
-                    context=note.context,
-                    nearest_neighbors_memories=neighbor_memory,
-                    max_neighbor_idx=len(indices) - 1,
-                    neighbor_count=len(indices),
-                )
-                update_response = self.llm_controller.llm.get_completion(update_prompt)
-                neighbor_updates = parse_update_neighbors(update_response, len(indices))
-                logger.debug("Neighbor updates: %s", neighbor_updates)
+                try:
+                    update_prompt = UPDATE_NEIGHBORS_PROMPT.format(
+                        content=note.content,
+                        context=note.context,
+                        nearest_neighbors_memories=neighbor_memory,
+                        max_neighbor_idx=len(indices) - 1,
+                        neighbor_count=len(indices),
+                    )
+                    update_response = self.llm_controller.llm.get_completion(update_prompt)
+                    neighbor_updates = parse_update_neighbors(update_response, len(indices))
+                    logger.debug("Neighbor updates: %s", neighbor_updates)
 
-                noteslist = list(self.memories.values())
-                notes_id = list(self.memories.keys())
-                for i in range(min(len(indices), len(neighbor_updates))):
-                    upd = neighbor_updates[i]
-                    memorytmp_idx = indices[i]
-                    if memorytmp_idx >= len(noteslist):
-                        continue
-                    notetmp = noteslist[memorytmp_idx]
-                    if upd["tags"]:
-                        notetmp.tags = upd["tags"]
-                    if upd["context"]:
-                        notetmp.context = upd["context"]
-                    self.memories[notes_id[memorytmp_idx]] = notetmp
+                    noteslist = list(self.memories.values())
+                    notes_id = list(self.memories.keys())
+                    for i in range(min(len(indices), len(neighbor_updates))):
+                        upd = neighbor_updates[i]
+                        memorytmp_idx = indices[i]
+                        if memorytmp_idx >= len(noteslist):
+                            continue
+                        notetmp = noteslist[memorytmp_idx]
+                        if upd["tags"]:
+                            notetmp.tags = upd["tags"]
+                        if upd["context"]:
+                            notetmp.context = upd["context"]
+                        self.memories[notes_id[memorytmp_idx]] = notetmp
+                        if self.refresh_index:
+                            self.retriever.update_document(memorytmp_idx, note_document(notetmp))
+
+                except Exception as e:  # keep what the strengthen step already applied
+                    logger.error("Neighbour update failed for note %s: %s", note.id, e)
+                    FAILURES["evolve"] += 1
+                    if not should_strengthen:
+                        return False, note
 
             return True, note
 
         except Exception as e:
             logger.error("Evolution failed for note %s: %s — storing without evolution", note.id, e)
+            FAILURES["evolve"] += 1
             return False, note

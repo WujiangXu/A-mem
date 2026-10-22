@@ -8,6 +8,7 @@ Usage:
 """
 
 from memory_layer_robust import RobustLLMController, RobustAgenticMemorySystem
+from memory_layer import FAILURES, valid_link, cache_is_current, mark_cache
 from llm_text_parsers import (
     parse_plain_text_answer,
     parse_relevant_parts,
@@ -26,10 +27,11 @@ from sentence_transformers import SentenceTransformer
 from sentence_transformers.util import pytorch_cos_sim
 import statistics
 from collections import defaultdict
+import copy
 import pickle
 import random
 from tqdm import tqdm
-from utils import calculate_metrics, aggregate_metrics
+from utils import calculate_metrics, aggregate_metrics, score_prediction
 from datetime import datetime
 
 # Download required NLTK data
@@ -54,13 +56,14 @@ class RobustAdvancedMemAgent:
     """Agent using the robust memory system with plain-text LLM calls."""
 
     def __init__(self, model, backend, retrieve_k, temperature_c5,
-                 sglang_host="http://localhost", sglang_port=30000):
+                 sglang_host="http://localhost", sglang_port=30000, refresh_index=False):
         self.memory_system = RobustAgenticMemorySystem(
             model_name='all-MiniLM-L6-v2',
             llm_backend=backend,
             llm_model=model,
             sglang_host=sglang_host,
             sglang_port=sglang_port,
+            refresh_index=refresh_index,
         )
         self.retriever_llm = RobustLLMController(
             backend=backend,
@@ -106,7 +109,8 @@ Keywords:"""
         logger.debug("generate_query_llm response: %s", result)
         return result
 
-    def answer_question(self, question: str, category: int, answer: str) -> tuple:
+    def answer_question(self, question: str, category: int, answer: str,
+                        rng: Optional[random.Random] = None) -> tuple:
         """Generate answer for a question — plain text, no JSON schema."""
         keywords = self.generate_query_llm(question)
         raw_context = self.retrieve_memory(keywords, k=self.retrieve_k)
@@ -116,7 +120,7 @@ Keywords:"""
 
         if category == 5:
             answer_tmp = list()
-            if random.random() < 0.5:
+            if (rng or random).random() < 0.5:
                 answer_tmp.append('Not mentioned in the conversation')
                 answer_tmp.append(answer)
             else:
@@ -149,8 +153,35 @@ Question: {question} Short answer:"""
             )
         except Exception as e:
             logger.warning("answer_question failed: %s — returning empty", e)
+            FAILURES["answer"] += 1  # scored as an empty prediction; reported at the end
             response = ""
         return response, user_prompt, raw_context
+
+
+def pool_memories(agents: List[RobustAdvancedMemAgent]) -> RobustAdvancedMemAgent:
+    """One agent whose memory is the union of the given agents' memories (--memory_scope pooled).
+    Notes and their retriever rows (the same texts and embeddings) are appended conversation by
+    conversation, and each note's links are offset to its position in the pooled list."""
+    memories, corpus, embeddings = {}, [], []
+    for agent in agents:
+        notes = list(agent.memory_system.memories.values())
+        retriever = agent.memory_system.retriever
+        assert len(notes) == len(retriever.corpus) == len(retriever.embeddings), "memory and retriever out of sync"
+        offset = len(memories)
+        for note in notes:
+            note = copy.copy(note)
+            note.links = [link + offset for link in note.links if valid_link(link, len(notes))]
+            memories[note.id] = note
+        corpus.extend(retriever.corpus)
+        embeddings.append(retriever.embeddings)
+    embeddings = np.vstack(embeddings)
+    assert len(memories) == len(corpus) == len(embeddings), "duplicate note ids across conversations"
+    pooled = agents[0]
+    pooled.memory_system.memories = memories
+    pooled.memory_system.retriever.corpus = corpus
+    pooled.memory_system.retriever.embeddings = embeddings
+    pooled.memory_system.retriever.document_ids = {doc: i for i, doc in enumerate(corpus)}
+    return pooled
 
 
 def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
@@ -174,16 +205,19 @@ def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
 def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] = None,
                      ratio: float = 1.0, backend: str = "sglang",
                      temperature_c5: float = 0.5, retrieve_k: int = 10,
-                     sglang_host: str = "http://localhost", sglang_port: int = 30000):
+                     sglang_host: str = "http://localhost", sglang_port: int = 30000,
+                     legacy_c5_reference: bool = False, seed: int = 42,
+                     refresh_index: bool = False, memory_scope: str = "conversation"):
     """Evaluate the robust agent on the LoComo dataset."""
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
-    log_filename = f"eval_robust_{model}_{backend}_ratio{ratio}_{timestamp}.log"
+    log_filename = f"eval_robust_{model}_{backend}_ratio{ratio}_{memory_scope}_{timestamp}.log"
     log_path = os.path.join(os.path.dirname(__file__), "logs", log_filename)
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
     eval_logger = setup_logger(log_path)
     eval_logger.info(f"Loading dataset from {dataset_path}")
     eval_logger.info(f"Using ROBUST memory layer (no JSON schema dependency)")
+    FAILURES.clear()
 
     samples = load_locomo_dataset(dataset_path)
     eval_logger.info(f"Loaded {len(samples)} samples")
@@ -203,14 +237,16 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     error_num = 0
     memories_dir = os.path.join(
         os.path.dirname(__file__),
-        "cached_memories_robust_{}_{}".format(backend, model),
+        "cached_memories_robust_{}_{}{}".format(backend, model, "_refresh" if refresh_index else ""),
     )
     os.makedirs(memories_dir, exist_ok=True)
     allow_categories = [1, 2, 3, 4, 5]
+    cached_samples, stale_cache_samples = [], []
 
-    for sample_idx, sample in enumerate(samples):
+    def load_or_build(sample_idx, sample):
+        """An agent holding this conversation's memory, loaded from the cache or built and cached."""
         agent = RobustAdvancedMemAgent(model, backend, retrieve_k, temperature_c5,
-                                       sglang_host, sglang_port)
+                                       sglang_host, sglang_port, refresh_index)
 
         memory_cache_file = os.path.join(memories_dir, f"memory_cache_sample_{sample_idx}.pkl")
         retriever_cache_file = os.path.join(memories_dir, f"retriever_cache_sample_{sample_idx}.pkl")
@@ -230,10 +266,13 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                 )
             else:
                 eval_logger.info(f"No retriever cache found, loading from memory")
-                agent.memory_system.retriever = agent.memory_system.retriever.load_from_local_memory(
-                    cached_memories, 'all-MiniLM-L6-v2'
-                )
+                agent.memory_system.consolidate_memories()  # the document format of this memory system
             eval_logger.info(f"Successfully loaded {len(cached_memories)} memories")
+            cached_samples.append(sample_idx)
+            if not cache_is_current(memory_cache_file):
+                stale_cache_samples.append(sample_idx)
+                eval_logger.warning(f"Memories of sample {sample_idx} were cached by another version of the memory "
+                                    f"layer; delete {memories_dir} to rebuild them")
         else:
             eval_logger.info(f"No cached memories found for sample {sample_idx}. Creating new memories.")
 
@@ -247,34 +286,44 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
             with open(memory_cache_file, 'wb') as f:
                 pickle.dump(memories_to_cache, f)
             agent.memory_system.retriever.save(retriever_cache_file, retriever_cache_embeddings_file)
+            mark_cache(memory_cache_file)
             eval_logger.info(f"Successfully cached {len(memories_to_cache)} memories")
+        return agent
+
+    if memory_scope == "pooled":
+        # every evaluated conversation's memory in one store: retrieval must also reject the
+        # other conversations' notes (issue #27); built from the same per-conversation caches
+        pooled_agent = pool_memories([load_or_build(i, s) for i, s in enumerate(samples)])
+        eval_logger.info(f"Pooled memory: {len(pooled_agent.memory_system.memories)} notes "
+                         f"from {len(samples)} conversations")
+
+    for sample_idx, sample in enumerate(samples):
+        agent = pooled_agent if memory_scope == "pooled" else load_or_build(sample_idx, sample)
 
         eval_logger.info(f"Processing sample {sample_idx + 1}/{len(samples)}")
 
-        for qa in sample.qa:
+        for qa_idx, qa in enumerate(sample.qa):
             if int(qa.category) in allow_categories:
                 total_questions += 1
                 category_counts[qa.category] += 1
 
+                # the category-5 option order comes from the question's own generator
+                rng = random.Random(f"{seed}:{sample_idx}:{qa_idx}")
                 prediction, user_prompt, raw_context = agent.answer_question(
-                    qa.question, qa.category, qa.final_answer
+                    qa.question, qa.category, qa.final_answer, rng
                 )
 
                 # Parse the prediction (handles both JSON and plain text)
                 prediction = parse_plain_text_answer(prediction)
 
+                reference, metrics = score_prediction(prediction, qa, legacy_c5_reference)
+
                 eval_logger.info(f"Question {total_questions}: {qa.question}")
                 eval_logger.info(f"Prediction: {prediction}")
-                eval_logger.info(f"Reference: {qa.final_answer}")
+                eval_logger.info(f"Reference: {reference}")
                 eval_logger.info(f"User Prompt: {user_prompt}")
                 eval_logger.info(f"Category: {qa.category}")
                 eval_logger.info(f"Raw Context: {raw_context}")
-
-                metrics = calculate_metrics(prediction, qa.final_answer) if qa.final_answer else {
-                    "exact_match": 0, "f1": 0.0, "rouge1_f": 0.0, "rouge2_f": 0.0,
-                    "rougeL_f": 0.0, "bleu1": 0.0, "bleu2": 0.0, "bleu3": 0.0,
-                    "bleu4": 0.0, "bert_f1": 0.0, "meteor": 0.0, "sbert_similarity": 0.0
-                }
 
                 all_metrics.append(metrics)
                 all_categories.append(qa.category)
@@ -283,8 +332,9 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                     "sample_id": sample_idx,
                     "question": qa.question,
                     "prediction": prediction,
-                    "reference": qa.final_answer,
+                    "reference": reference,
                     "category": qa.category,
+                    "adversarial_answer": qa.adversarial_answer,
                     "metrics": metrics,
                 }
                 results.append(result)
@@ -303,9 +353,21 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
             str(cat): count for cat, count in category_counts.items()
         },
         "aggregate_metrics": aggregate_results,
+        "ratio": ratio,
+        "seed": seed,
+        "legacy_c5_reference": legacy_c5_reference,
+        "refresh_index": refresh_index,
+        "memory_scope": memory_scope,
+        "pooled_notes": len(pooled_agent.memory_system.memories) if memory_scope == "pooled" else None,
+        "cached_samples": cached_samples,
+        "stale_cache_samples": stale_cache_samples,
+        # failures absorbed in this run (memories loaded from the cache were built earlier);
+        # "answer" counts questions scored as empty predictions because the call failed
+        "llm_failures": dict(FAILURES),
         "individual_results": results,
     }
     eval_logger.info(f"Error number: {error_num}")
+    eval_logger.info(f"LLM failures absorbed in this run: {dict(FAILURES) or 'none'}")
 
     if output_path:
         with open(output_path, 'w') as f:
@@ -351,6 +413,20 @@ def main():
                         help="SGLang server host (for sglang backend)")
     parser.add_argument("--sglang_port", type=int, default=30000,
                         help="SGLang server port (for sglang backend)")
+    parser.add_argument("--legacy_c5_reference", action="store_true",
+                        help="Score category 5 against the adversarial answer, as the paper's evaluation did "
+                             "(default: against 'Not mentioned in the conversation', the correct response)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for the order of the two category-5 answer options")
+    parser.add_argument("--refresh_index", action="store_true",
+                        help="Re-embed neighbour memories as soon as evolution updates them (default: their "
+                             "embeddings refresh only every evo_threshold evolutions, as in the paper). Builds "
+                             "its own memory cache")
+    parser.add_argument("--memory_scope", choices=["conversation", "pooled"], default="conversation",
+                        help="conversation: each question is answered from its own conversation's memory "
+                             "(LoCoMo's protocol, as in the paper). pooled: from one memory holding all "
+                             "evaluated conversations, so retrieval must also reject other conversations' "
+                             "notes (uses the same memory caches)")
     args = parser.parse_args()
 
     if args.ratio <= 0.0 or args.ratio > 1.0:
@@ -362,7 +438,8 @@ def main():
     evaluate_dataset(
         dataset_path, args.model, output_path, args.ratio,
         args.backend, args.temperature_c5, args.retrieve_k,
-        args.sglang_host, args.sglang_port,
+        args.sglang_host, args.sglang_port, args.legacy_c5_reference, args.seed,
+        args.refresh_index, args.memory_scope,
     )
 
 

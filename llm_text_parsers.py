@@ -314,7 +314,7 @@ def parse_strengthen_details(response: str) -> Dict[str, Any]:
 
     # Map from JSON keys if needed
     if "suggested_connections" in result and "connections" not in result:
-        result["connections"] = [int(x) for x in result.get("suggested_connections", []) if isinstance(x, (int, float))]
+        result["connections"] = list(result.get("suggested_connections", []))  # validated by the memory system
     if "tags_to_update" in result and "tags" not in result:
         result["tags"] = result.get("tags_to_update", [])
 

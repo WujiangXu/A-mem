@@ -1,4 +1,4 @@
-from memory_layer import LLMController, AgenticMemorySystem
+from memory_layer import LLMController, AgenticMemorySystem, FAILURES, cache_is_current, mark_cache
 import os
 import json
 import argparse
@@ -17,7 +17,7 @@ from collections import defaultdict
 import pickle
 import random
 from tqdm import tqdm
-from utils import calculate_metrics, aggregate_metrics
+from utils import calculate_metrics, aggregate_metrics, score_prediction
 from datetime import datetime
 
 # Download required NLTK data
@@ -36,13 +36,15 @@ except Exception as e:
     sentence_model = None
 
 class advancedMemAgent:
-    def __init__(self, model, backend, retrieve_k, temperature_c5, sglang_host="http://localhost", sglang_port=30000):
+    def __init__(self, model, backend, retrieve_k, temperature_c5, sglang_host="http://localhost", sglang_port=30000,
+                 refresh_index=False):
         self.memory_system = AgenticMemorySystem(
             model_name='all-MiniLM-L6-v2',
             llm_backend=backend,
             llm_model=model,
             sglang_host=sglang_host,
-            sglang_port=sglang_port
+            sglang_port=sglang_port,
+            refresh_index=refresh_index
         )
         self.retriever_llm = LLMController(
             backend=backend, 
@@ -124,7 +126,7 @@ class advancedMemAgent:
             response = response.strip()
         return response
 
-    def answer_question(self, question: str, category: int, answer: str) -> str:
+    def answer_question(self, question: str, category: int, answer: str, rng: Optional[random.Random] = None) -> str:
         """Generate answer for a question given the conversation context."""
         keywords = self.generate_query_llm(question)
         # if category == 3:
@@ -146,7 +148,7 @@ class advancedMemAgent:
         temperature = 0.7
         if category == 5: # adversial question, follow the initial paper.
             answer_tmp = list()
-            if random.random() < 0.5:
+            if (rng or random).random() < 0.5:
                 answer_tmp.append('Not mentioned in the conversation')
                 answer_tmp.append(answer)
             else:
@@ -214,7 +216,7 @@ def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
     
     return logger
 
-def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] = None, ratio: float = 1.0, backend: str = "sglang", temperature_c5: float = 0.5, retrieve_k: int = 10, sglang_host: str = "http://localhost", sglang_port: int = 30000):
+def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] = None, ratio: float = 1.0, backend: str = "sglang", temperature_c5: float = 0.5, retrieve_k: int = 10, sglang_host: str = "http://localhost", sglang_port: int = 30000, legacy_c5_reference: bool = False, seed: int = 42, refresh_index: bool = False):
     """Evaluate the agent on the LoComo dataset.
     
     Args:
@@ -233,6 +235,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     
     logger = setup_logger(log_path)
     logger.info(f"Loading dataset from {dataset_path}")
+    FAILURES.clear()
     
     # Load dataset
     samples = load_locomo_dataset(dataset_path)
@@ -254,11 +257,13 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     # Evaluate each sample
     i = 0
     error_num = 0
-    memories_dir = os.path.join(os.path.dirname(__file__), "cached_memories_advanced_{}_{}".format(backend, model))
+    memories_dir = os.path.join(os.path.dirname(__file__), "cached_memories_advanced_{}_{}{}".format(
+        backend, model, "_refresh" if refresh_index else ""))
     os.makedirs(memories_dir, exist_ok=True)
     allow_categories = [1,2,3,4,5]
+    cached_samples, stale_cache_samples = [], []
     for sample_idx, sample in enumerate(samples):
-        agent = advancedMemAgent(model, backend, retrieve_k, temperature_c5, sglang_host, sglang_port)
+        agent = advancedMemAgent(model, backend, retrieve_k, temperature_c5, sglang_host, sglang_port, refresh_index)
         # Create memory cache filename based on sample and session indices
         memory_cache_file = os.path.join(
             memories_dir,
@@ -288,9 +293,14 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                 agent.memory_system.retriever = agent.memory_system.retriever.load(retriever_cache_file,retriever_cache_embeddings_file)
             else:
                 print(f"No retriever cache found at {retriever_cache_file}, loading from memory")
-                agent.memory_system.retriever = agent.memory_system.retriever.load_from_local_memory(cached_memories, 'all-MiniLM-L6-v2')
+                agent.memory_system.consolidate_memories()  # the document format of this memory system
             print(agent.memory_system.retriever.corpus)
             logger.info(f"Successfully loaded {len(cached_memories)} memories")
+            cached_samples.append(sample_idx)
+            if not cache_is_current(memory_cache_file):
+                stale_cache_samples.append(sample_idx)
+                logger.warning(f"Memories of sample {sample_idx} were cached by another version of the memory "
+                               f"layer; delete {memories_dir} to rebuild them")
             # except Exception as e:
             #     logger.info(f"Error loading cached memories: {e}. Will recreate memories.")
             #     cached_memories = None
@@ -312,37 +322,33 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
             with open(memory_cache_file, 'wb') as f:
                 pickle.dump(memories_to_cache, f)
             agent.memory_system.retriever.save(retriever_cache_file,retriever_cache_embeddings_file)
+            mark_cache(memory_cache_file)
             logger.info(f"\nSuccessfully cached {len(memories_to_cache)} memories")
             
         logger.info(f"\nProcessing sample {sample_idx + 1}/{len(samples)}")
         
-        for qa in sample.qa:
+        for qa_idx, qa in enumerate(sample.qa):
             if int(qa.category) in allow_categories:
                 total_questions += 1
                 category_counts[qa.category] += 1
                 
-                # Generate prediction
-                prediction, user_prompt,raw_context = agent.answer_question(qa.question,qa.category,qa.final_answer)
+                # Generate prediction; the category-5 option order comes from the question's own generator
+                rng = random.Random(f"{seed}:{sample_idx}:{qa_idx}")
+                prediction, user_prompt,raw_context = agent.answer_question(qa.question,qa.category,qa.final_answer,rng)
                 try:
                     prediction = json.loads(prediction)["answer"]
                 except:
                     prediction = prediction
                     logger.info(f"Failed to parse prediction as JSON: {prediction}")
                     error_num += 1
+                reference, metrics = score_prediction(prediction, qa, legacy_c5_reference)
                 # Log results
                 logger.info(f"\nQuestion {total_questions}: {qa.question}")
                 logger.info(f"Prediction: {prediction}")
-                logger.info(f"Reference: {qa.final_answer}")
+                logger.info(f"Reference: {reference}")
                 logger.info(f"User Prompt: {user_prompt}")
                 logger.info(f"Category: {qa.category}")
                 logger.info(f"Raw Context: {raw_context}")
-                
-                # Calculate metrics
-                metrics = calculate_metrics(prediction, qa.final_answer) if qa.final_answer else {
-                    "exact_match": 0, "f1": 0.0, "rouge1_f": 0.0, "rouge2_f": 0.0, 
-                    "rougeL_f": 0.0, "bleu1": 0.0, "bleu2": 0.0, "bleu3": 0.0, 
-                    "bleu4": 0.0, "bert_f1": 0.0, "meteor": 0.0, "sbert_similarity": 0.0
-                }
                 
                 all_metrics.append(metrics)
                 all_categories.append(qa.category)
@@ -352,8 +358,9 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                     "sample_id": sample_idx,
                     "question": qa.question,
                     "prediction": prediction,
-                    "reference": qa.final_answer,
+                    "reference": reference,
                     "category": qa.category,
+                    "adversarial_answer": qa.adversarial_answer,
                     "metrics": metrics
                 }
                 results.append(result)
@@ -374,9 +381,19 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
             str(cat): count for cat, count in category_counts.items()
         },
         "aggregate_metrics": aggregate_results,
+        "ratio": ratio,
+        "seed": seed,
+        "legacy_c5_reference": legacy_c5_reference,
+        "cached_samples": cached_samples,
+        "stale_cache_samples": stale_cache_samples,
+        "refresh_index": refresh_index,
+        # failures absorbed in this run (memories loaded from the cache were built earlier)
+        "llm_failures": dict(FAILURES),
+        "answer_parse_errors": error_num,
         "individual_results": results
     }
     logger.info(f"Error number: {error_num}")
+    logger.info(f"LLM failures absorbed in this run: {dict(FAILURES) or 'none'}")
     # Save results
     if output_path:
         with open(output_path, 'w') as f:
@@ -420,6 +437,15 @@ def main():
                       help="SGLang server host (for sglang backend)")
     parser.add_argument("--sglang_port", type=int, default=30000,
                       help="SGLang server port (for sglang backend)")
+    parser.add_argument("--legacy_c5_reference", action="store_true",
+                      help="Score category 5 against the adversarial answer, as the paper's evaluation did "
+                           "(default: against 'Not mentioned in the conversation', the correct response)")
+    parser.add_argument("--seed", type=int, default=42,
+                      help="Random seed for the order of the two category-5 answer options")
+    parser.add_argument("--refresh_index", action="store_true",
+                      help="Re-embed neighbour memories as soon as evolution updates them (default: their "
+                           "embeddings refresh only every evo_threshold evolutions, as in the paper). Builds "
+                           "its own memory cache")
     args = parser.parse_args()
     
     if args.ratio <= 0.0 or args.ratio > 1.0:
@@ -432,7 +458,7 @@ def main():
     else:
         output_path = None
     
-    evaluate_dataset(dataset_path, args.model, output_path, args.ratio, args.backend, args.temperature_c5, args.retrieve_k, args.sglang_host, args.sglang_port)
+    evaluate_dataset(dataset_path, args.model, output_path, args.ratio, args.backend, args.temperature_c5, args.retrieve_k, args.sglang_host, args.sglang_port, args.legacy_c5_reference, args.seed, args.refresh_index)
 
 if __name__ == "__main__":
     main()

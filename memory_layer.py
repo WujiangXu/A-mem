@@ -1,6 +1,7 @@
 from ast import Str
 from typing import List, Dict, Optional, Literal, Any, Union
 import json
+import re
 from datetime import datetime
 import uuid
 from rank_bm25 import BM25Okapi
@@ -17,6 +18,45 @@ from litellm import completion
 import requests
 import json as json_lib
 import time
+from collections import Counter
+
+# LLM failures that were absorbed (the call fell back to an empty or default result) instead of
+# raised, by kind. The evaluation scripts report them, so silent failures show up in the results.
+FAILURES = Counter()
+
+# Version of note construction. The evaluation scripts mark each memory cache with it and warn when they load one
+# written by another version (e.g. before analysis could parse notes; see the commit history).
+MEMORY_VERSION = 2
+
+def cache_is_current(cache_file: str) -> bool:
+    """True if the pickled memories in cache_file were written by this MEMORY_VERSION."""
+    marker = cache_file + ".version"
+    return os.path.exists(marker) and open(marker).read().strip() == str(MEMORY_VERSION)
+
+def mark_cache(cache_file: str):
+    with open(cache_file + ".version", "w") as f:
+        f.write(str(MEMORY_VERSION))
+
+def as_index(i):
+    """i as an int if it is a whole number (int, numpy integer, integral float or digit string), else None."""
+    if isinstance(i, bool):
+        return None
+    if isinstance(i, (int, np.integer)):
+        return int(i)
+    if isinstance(i, float) and i.is_integer():
+        return int(i)
+    if isinstance(i, str) and i.strip().isdigit():
+        return int(i.strip())
+    return None
+
+def valid_link(i, n: int) -> bool:
+    """True if i can index a memory list of length n (bool and negative indices are rejected)."""
+    return isinstance(i, (int, np.integer)) and not isinstance(i, bool) and 0 <= i < n
+
+def note_document(note) -> str:
+    """The text add_note embeds for a memory note."""
+    return ("content:" + note.content + " context:" + note.context + " keywords: " + ", ".join(note.keywords)
+            + " tags: " + ", ".join(note.tags))
 
 def simple_tokenize(text):
     return word_tokenize(text)
@@ -97,6 +137,8 @@ class OllamaController(BaseLLMController):
             )
             return response.choices[0].message.content
         except Exception as e:
+            print(f"Ollama completion error: {e}")
+            FAILURES["llm_call"] += 1
             empty_response = self._generate_empty_response(response_format)
             return json.dumps(empty_response)
 
@@ -169,6 +211,7 @@ class SGLangController(BaseLLMController):
                 
         except Exception as e:
             print(f"SGLang completion error: {e}")
+            FAILURES["llm_call"] += 1
             empty_response = self._generate_empty_response(response_format)
             return json.dumps(empty_response)
 
@@ -230,6 +273,7 @@ class LiteLLMController(BaseLLMController):
             
         except Exception as e:
             print(f"LiteLLM completion error: {e}")
+            FAILURES["llm_call"] += 1
             empty_response = self._generate_empty_response(response_format)
             return json.dumps(empty_response)
 
@@ -335,6 +379,7 @@ class MemoryNote:
 
             Content for analysis:
             """ + content
+        response = None  # printed by the handler below if the call itself fails
         try:
             response = llm_controller.llm.get_completion(prompt,response_format={"type": "json_schema", "json_schema": {
                         "name": "response",
@@ -376,11 +421,16 @@ class MemoryNote:
             #         end_idx = response_cleaned.rfind('}')
             #         if end_idx != -1:
             #             response_cleaned = response_cleaned[:end_idx+1]
-            try:        
-                response = re.sub(r'^```json\s*|\s*```$', '', response, flags=re.MULTILINE).strip()
-                analysis = json.loads(response)
-            except:
+            try:
+                text = re.sub(r'^```json\s*|\s*```$', '', response, flags=re.MULTILINE).strip()
+                if not text.startswith('{'):  # text around the JSON object
+                    text = text[text.find('{'):text.rfind('}') + 1]
+                analysis = json.loads(text)
+                for key, default in (("keywords", []), ("context", "General"), ("tags", [])):
+                    analysis.setdefault(key, default)
+            except Exception as e:
                 print(f"JSON parsing error in analyze_content: {e}")
+                FAILURES["analyze"] += 1
                 print(f"Raw response: {response}")
                 analysis = {
                     "keywords": [],
@@ -392,6 +442,7 @@ class MemoryNote:
             
         except Exception as e:
             print(f"Error analyzing content: {str(e)}")
+            FAILURES["analyze"] += 1
             print(f"Raw response: {response}")
             return {
                 "keywords": [],
@@ -518,11 +569,11 @@ class HybridRetriever:
             self.bm25.add_document(tokenized_doc)
         
         # Update embeddings
-        doc_embedding = self.model.encode([document], convert_to_tensor=True)
+        doc_embedding = self.model.encode([document])
         if self.embeddings is None:
             self.embeddings = doc_embedding
         else:
-            self.embeddings = torch.cat([self.embeddings, doc_embedding])
+            self.embeddings = np.vstack([self.embeddings, doc_embedding])
             
         return True
         
@@ -608,6 +659,14 @@ class SimpleEmbeddingRetriever:
         
             
         return top_k_indices
+
+    def update_document(self, idx: int, document: str):
+        """Replace document idx and its embedding in place."""
+        if self.document_ids.get(self.corpus[idx]) == idx:
+            del self.document_ids[self.corpus[idx]]
+        self.corpus[idx] = document
+        self.embeddings[idx] = self.model.encode([document])[0]
+        self.document_ids[document] = int(idx)
         
     def save(self, retriever_cache_file: str, retriever_cache_embeddings_file: str):
         """Save retriever state to disk"""
@@ -673,8 +732,12 @@ class AgenticMemorySystem:
                  api_key: Optional[str] = None,
                  api_base: Optional[str] = None,
                  sglang_host: str = "http://localhost",
-                 sglang_port: int = 30000):
+                 sglang_port: int = 30000,
+                 refresh_index: bool = False):
         self.memories = {}  # id -> MemoryNote
+        # re-embed neighbours as soon as evolution updates them; otherwise their embeddings stay
+        # stale until consolidate_memories runs every evo_threshold evolutions (paper behaviour)
+        self.refresh_index = refresh_index
         self.retriever = SimpleEmbeddingRetriever(model_name)
         self.llm_controller = LLMController(llm_backend, llm_model, api_key, api_base, sglang_host, sglang_port)
         self.evolution_system_prompt = '''
@@ -719,7 +782,7 @@ class AgenticMemorySystem:
         # all_docs = [m.content for m in self.memories.values()]
         evo_label, note = self.process_memory(note)
         self.memories[note.id] = note
-        self.retriever.add_documents(["content:" + note.content + " context:" + note.context + " keywords: " + ", ".join(note.keywords) + " tags: " + ", ".join(note.tags)])
+        self.retriever.add_documents([note_document(note)])
         if evo_label == True:
             self.evo_cnt += 1
             if self.evo_cnt % self.evo_threshold == 0:
@@ -745,6 +808,9 @@ class AgenticMemorySystem:
         
         # Re-add all memory documents with their metadata
         for memory in self.memories.values():
+            if self.refresh_index:  # the same document format as add_note
+                self.retriever.add_documents([note_document(memory)])
+                continue
             # Combine memory metadata into a single searchable document
             metadata_text = f"{memory.context} {' '.join(memory.keywords)} {' '.join(memory.tags)}"
             # Add both the content and metadata as separate documents for better retrieval
@@ -752,6 +818,15 @@ class AgenticMemorySystem:
     
     def process_memory(self, note: MemoryNote) -> bool:
         """Process a memory note and return an evolution label"""
+        try:
+            return self._evolve(note)
+        except Exception as e:  # an API error, or valid JSON without the expected fields: store the note unevolved
+            print(f"Evolution failed: {e}")
+            FAILURES["evolve"] += 1
+            return False, note
+
+    def _evolve(self, note: MemoryNote):
+        """One evolution step: the LLM decides on links to the nearest neighbours and on updates to them."""
         neighbor_memory, indices = self.find_related_memories(note.content, k=5)
         prompt_memory = self.evolution_system_prompt.format(context=note.context, content=note.content, keywords=note.keywords, nearest_neighbors_memories=neighbor_memory,neighbor_number=len(indices))
         print("prompt_memory", prompt_memory)
@@ -823,17 +898,37 @@ class AgenticMemorySystem:
         except json.JSONDecodeError as e:
             print(f"JSON parsing error: {e}")
             print(f"Raw response: {response}")
+            FAILURES["evolve"] += 1
             # Return default values for failed parsing
             return False, note
+        # validate before changing anything, so a malformed decision leaves the note and its neighbours as they were
+        required = {"strengthen": ("suggested_connections", "tags_to_update"),
+                    "update_neighbor": ("new_context_neighborhood", "new_tags_neighborhood")}
+        if not isinstance(response_json, dict) or "should_evolve" not in response_json:
+            raise ValueError(f"evolution decision without should_evolve: {response_json!r:.200}")
+        if response_json["should_evolve"]:
+            missing = [k for a in response_json.get("actions") or [] for k in required.get(a, ())
+                       if not isinstance(response_json.get(k), list)]
+            if missing:
+                raise ValueError(f"evolution decision without {missing}")
         should_evolve = response_json["should_evolve"]
         if should_evolve:
             actions = response_json["actions"]
             for action in actions:
                 if action == "strengthen":
-                    suggest_connections = response_json["suggested_connections"]
+                    # keep only the shown neighbours' "memory index" values: an out-of-range id breaks
+                    # retrieval, and any other id points at a memory the LLM never saw
+                    shown = {int(i) for i in indices}
+                    suggest_connections = []
+                    for c in map(as_index, response_json["suggested_connections"]):
+                        if c in shown:
+                            suggest_connections.append(c)
+                        else:
+                            FAILURES["invalid_link"] += 1
                     new_tags = response_json["tags_to_update"]
                     note.links.extend(suggest_connections)
-                    note.tags = new_tags
+                    if new_tags:  # an empty list must not wipe the note's tags
+                        note.tags = new_tags
                 elif action == "update_neighbor":
                     new_context_neighborhood = response_json["new_context_neighborhood"]
                     new_tags_neighborhood = response_json["new_tags_neighborhood"]
@@ -850,10 +945,14 @@ class AgenticMemorySystem:
                             context = noteslist[indices[i]].context
                         memorytmp_idx = indices[i]
                         notetmp = noteslist[memorytmp_idx]
-                        # add tag to memory
-                        notetmp.tags = tag
-                        notetmp.context = context
+                        # add tag to memory; empty values keep the existing ones
+                        if tag:
+                            notetmp.tags = tag
+                        if context:
+                            notetmp.context = context
                         self.memories[notes_id[memorytmp_idx]] = notetmp
+                        if self.refresh_index:
+                            self.retriever.update_document(memorytmp_idx, note_document(notetmp))
         return should_evolve,note
 
     def find_related_memories(self, query: str, k: int = 5) -> List[MemoryNote]:
@@ -891,6 +990,8 @@ class AgenticMemorySystem:
             memory_str +=  "talk start time:" + all_memories[i].timestamp + "memory content: " + all_memories[i].content + "memory context: " + all_memories[i].context + "memory keywords: " + str(all_memories[i].keywords) + "memory tags: " + str(all_memories[i].tags) + "\n"
             neighborhood = all_memories[i].links
             for neighbor in neighborhood:
+                if not valid_link(neighbor, len(all_memories)):  # e.g. memories cached before link validation
+                    continue
                 memory_str += "talk start time:" + all_memories[neighbor].timestamp + "memory content: " + all_memories[neighbor].content + "memory context: " + all_memories[neighbor].context + "memory keywords: " + str(all_memories[neighbor].keywords) + "memory tags: " + str(all_memories[neighbor].tags) + "\n"
                 if j >=k:
                     break
