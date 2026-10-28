@@ -6,6 +6,8 @@ A novel agentic memory system for LLM agents that can dynamically organize memor
 
 For more details, please refer to our paper: [A-Mem: Agentic Memory for LLM Agents](https://arxiv.org/pdf/2502.12110)
 
+> 🔥 **News (Oct 2026):** We provide a stronger version of A-Mem, **FlexA-Mem: Budget-Adaptive Agentic Memory for LLM Agents** ([paper](https://arxiv.org/html/2610.33274v1), [code](https://github.com/WujiangXu/Flex-Amem)). FlexA-Mem keeps A-Mem's linked notes but uses them as the compressed history itself: at every step, the agent sees the whole history as a timeline of notes, and the notes most relevant to the current step are expanded in place into their raw content or excerpts, so the prompt fits any token budget. It is evaluated on LongMemEval-S, LoCoMo, SWE-bench Verified and AppWorld.
+
 ## Introduction 🌟
 
 Large Language Model (LLM) agents have demonstrated remarkable capabilities in handling complex real-world tasks through external tool usage. However, to effectively leverage historical experiences, they require sophisticated memory systems. Traditional memory systems, while providing basic storage and retrieval functionality, often lack advanced memory organization capabilities.
@@ -132,7 +134,7 @@ For more details about the categories, please refer to [this GitHub issue](https
 
 ## Citation 📚
 
-If you use this code in your research, please cite our work:
+If you use this code in your research, please cite our series of works on agentic memory:
 
 ```bibtex
 @inproceedings{xu2025amem,
@@ -140,6 +142,13 @@ If you use this code in your research, please cite our work:
   author={Xu, Wujiang and Liang, Zujie and Mei, Kai and Gao, Hang and Tan, Juntao and Zhang, Yongfeng},
   booktitle={Advances in Neural Information Processing Systems},
   year={2025}
+}
+
+@article{xu2026flexamem,
+  title={FlexA-Mem: Budget-Adaptive Agentic Memory for LLM Agents},
+  author={Xu, Wujiang and Han, Jiaojiao and Zhu, Xi and Zhang, Qizheng and Liang, Kaiqu and Yin, Yutong and Mei, Kai and Metaxas, Dimitris N.},
+  journal={arXiv preprint arXiv:2610.33274},
+  year={2026}
 }
 ```
 
